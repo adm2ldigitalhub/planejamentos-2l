@@ -195,7 +195,8 @@ textarea.in{resize:vertical;min-height:70px;line-height:1.45}
 .loading{color:var(--muted);padding:40px 0;text-align:center}
 .month.hidden+.savestate{margin-left:auto}
 .tabs{display:flex;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:3px}
-.tabs button{border:0;background:none;border-radius:999px;height:32px;padding:0 14px;font-size:13px;color:var(--muted);white-space:nowrap}
+.tabs button,.tabs a{border:0;background:none;border-radius:999px;height:32px;padding:0 14px;font-size:13px;color:var(--muted);white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;text-decoration:none}
+.tabs a:hover,.tabs button:hover{color:var(--text)}
 .tabs button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);font-weight:600}
 .pill.onboarding{border-color:var(--accent);color:var(--accent)}
 .pill.ativo{background:var(--surface2);color:var(--text)}
@@ -219,14 +220,14 @@ textarea.in{resize:vertical;min-height:70px;line-height:1.45}
 .pub .sec h2{margin-bottom:12px}
 .req{color:var(--accent)}
 @media (max-width:640px){.d4row{grid-template-columns:1fr auto}.d4row code{grid-column:1/-1}}
-@media (max-width:560px){.brand span{display:none}.month{order:4;width:100%;justify-content:space-between;margin-left:0}.month strong{flex:1}.top-in{gap:8px;padding:12px 14px}.brand img{height:18px}.savestate{margin-left:auto;min-width:0}.tabs{order:3;width:100%}.tabs button{flex:1}}
+@media (max-width:560px){.brand span{display:none}.month{order:4;width:100%;justify-content:space-between;margin-left:0}.month strong{flex:1}.top-in{gap:8px;padding:12px 14px}.brand img{height:18px}.savestate{margin-left:auto;min-width:0}.tabs{order:3;width:100%}.tabs button,.tabs a{flex:1;padding:0 8px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
 <body>
 <header class="top"><div class="top-in">
   <div class="brand"><img id="logo" alt="2L Digital Hub"><span id="brandSub">Planejamentos</span></div>
-  <nav class="tabs hidden" id="tabs" aria-label="Seções"><button data-tab="plan">Planejamentos</button><button data-tab="clients">Clientes</button></nav>
+  <nav class="tabs hidden" id="tabs" aria-label="Seções"><button data-tab="plan">Planejamentos</button><button data-tab="clients">Clientes</button><a data-tab="esteira" href="esteira/">Esteira</a></nav>
   <div class="month hidden" id="monthBox" aria-label="Mês do planejamento">
     <button id="mPrev" aria-label="Mês anterior">‹</button><strong id="mLabel"></strong><button id="mNext" aria-label="Próximo mês">›</button>
   </div>
@@ -524,7 +525,10 @@ function renderTop(){
   const plan=S.view==="list"||S.view==="client";
   $("#mLabel").textContent=monthLabel(S.month);$("#logo").src=LOGO;
   $("#monthBox").classList.toggle("hidden",!S.loaded||!plan);$("#openSettings").classList.toggle("hidden",!S.loaded);
-  const both=S.loaded&&can("planejamentos")&&canClients();
+  // abas só das áreas que o login pode usar; com uma área só, fica o nome dela
+  const areas={plan:can("planejamentos"),clients:canClients(),esteira:can("esteira")};
+  const both=S.loaded&&Object.values(areas).filter(Boolean).length>1;
+  $("#tabs").querySelectorAll("[data-tab]").forEach(b=>b.classList.toggle("hidden",!areas[b.dataset.tab]));
   $("#tabs").classList.toggle("hidden",!both);$("#brandSub").classList.toggle("hidden",both);
   if(S.loaded)$("#brandSub").textContent=can("planejamentos")?"Planejamentos":"Clientes";
   $("#tabs").querySelectorAll("button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.tab==="plan"?plan:!plan)));
@@ -1473,7 +1477,7 @@ async function changeMonth(n){
 $("#mPrev").onclick=()=>changeMonth(-1);
 $("#mNext").onclick=()=>changeMonth(1);
 $("#openSettings").onclick=settingsModal;
-$("#tabs").onclick=e=>{const b=e.target.closest("[data-tab]");if(!b)return;flushTimers();window.scrollTo(0,0);
+$("#tabs").onclick=e=>{const b=e.target.closest("[data-tab]");if(!b||b.dataset.tab==="esteira")return;flushTimers();window.scrollTo(0,0);
   if(b.dataset.tab==="plan"){S.view="list";S.clientId=null;S.draft=null;renderList()}else renderClients()};
 $("#themeBtn").onclick=()=>{const t=isDark()?"light":"dark";applyTheme(t);try{localStorage.setItem("theme",t)}catch(e){}};
 darkMQ.addEventListener("change",paintThemeBtn);
