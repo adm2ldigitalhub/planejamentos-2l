@@ -45,21 +45,29 @@ create table if not exists settings (
   data jsonb default '{}'::jsonb
 );
 
--- Perfil de cada login. Quem não está aqui entra como equipe.
---   admin        vê tudo, inclusive valores e dados do contrato
---   equipe       planejamentos e clientes, sem valores
---   planejamento só a parte de planejamentos (cadastra cliente e pacote, sem a aba Clientes)
+-- O que cada login pode usar. Quem não está aqui não vê nada.
+--   planejamentos  planejamento do mês (cadastra cliente e pacote)
+--   clientes       aba Clientes, sem valores
+--   contratos      valores, dados do contrato e formulário do cliente
+--   esteira        esteira de posts
+--   acessos        cria logins e define o que cada um pode usar (administrador)
+-- Depois do primeiro acesso, tudo isso se muda no site, em Ajustes > Acessos.
 create table if not exists team (
   email text primary key,
   role text not null default 'equipe'
 );
 alter table team drop constraint if exists team_role_check;
-alter table team add constraint team_role_check check (role in ('admin','equipe','planejamento'));
-insert into team (email, role) values
-  ('adm@2ldigitalhub.com', 'admin'),
-  ('criativo.2ldigitalhub@gmail.com', 'admin'),
-  ('sm2.2ldigitalhub@gmail.com', 'planejamento')
-on conflict (email) do nothing;   -- depois, mude os perfis em Ajustes > Acessos
+alter table team add column if not exists nome text default '';
+alter table team add column if not exists perms text[];
+update team set perms = case role
+    when 'admin' then array['planejamentos','clientes','contratos','esteira','acessos']
+    when 'planejamento' then array['planejamentos']
+    else array['planejamentos','clientes'] end
+  where perms is null;
+-- o administrador principal sempre tem tudo
+insert into team (email, role, nome, perms)
+values ('adm@2ldigitalhub.com', 'admin', 'Administrador', array['planejamentos','clientes','contratos','esteira','acessos'])
+on conflict (email) do update set perms = excluded.perms, role = 'admin';
 
 -- Dados do contrato e cadastrais (valores, CPF, endereço…): só administrador
 create table if not exists client_private (
@@ -76,14 +84,23 @@ create table if not exists client_forms (
   submitted_at timestamptz
 );
 
+create or replace function my_perms() returns text[]
+language sql stable security definer set search_path = public as $$
+  select coalesce((select perms from team where lower(email) = lower(auth.jwt() ->> 'email')), '{}')
+$$;
+create or replace function has_perm(p text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select p = any (my_perms())
+$$;
+-- administrador = quem gerencia os acessos (usado também pela esteira)
 create or replace function is_admin() returns boolean
 language sql stable security definer set search_path = public as $$
-  select exists (select 1 from team where lower(email) = lower(auth.jwt() ->> 'email') and role = 'admin')
+  select has_perm('acessos')
 $$;
-
+-- versão antiga do site
 create or replace function my_role() returns text
 language sql stable security definer set search_path = public as $$
-  select coalesce((select role from team where lower(email) = lower(auth.jwt() ->> 'email')), 'equipe')
+  select case when has_perm('contratos') then 'admin' when has_perm('clientes') then 'equipe' else 'planejamento' end
 $$;
 
 -- grava só os campos alterados, sem apagar o que o cliente mandou pelo formulário
@@ -124,7 +141,7 @@ revoke all on function submit_onboarding(uuid, jsonb) from public;
 grant execute on function onboarding_info(uuid) to anon, authenticated;
 grant execute on function submit_onboarding(uuid, jsonb) to anon, authenticated;
 
--- Só quem faz login (a equipe) lê e grava. Dados do contrato, só administrador.
+-- Cada parte só abre para quem tem a permissão dela.
 alter table clients        enable row level security;
 alter table plans          enable row level security;
 alter table settings       enable row level security;
@@ -143,16 +160,19 @@ drop policy if exists "proprio ou admin" on team;
 drop policy if exists "admin" on team;
 drop policy if exists "admin" on client_private;
 drop policy if exists "admin" on client_forms;
-create policy "equipe le"    on clients for select to authenticated using (true);
-create policy "equipe cria"  on clients for insert to authenticated with check (true);
-create policy "equipe edita" on clients for update to authenticated using (true) with check (true);
-create policy "admin apaga"  on clients for delete to authenticated using (is_admin());
-create policy "equipe" on plans    for all to authenticated using (true) with check (true);
-create policy "equipe" on settings for all to authenticated using (true) with check (true);
-create policy "proprio ou admin" on team for select to authenticated using (lower(email) = lower(auth.jwt() ->> 'email') or is_admin());
-create policy "admin" on team           for all to authenticated using (is_admin()) with check (is_admin());
-create policy "admin" on client_private for all to authenticated using (is_admin()) with check (is_admin());
-create policy "admin" on client_forms   for all to authenticated using (is_admin()) with check (is_admin());
+drop policy if exists "le" on settings;
+drop policy if exists "grava" on settings;
+create policy "equipe le"    on clients for select to authenticated using (cardinality(my_perms()) > 0);
+create policy "equipe cria"  on clients for insert to authenticated with check (has_perm('planejamentos') or has_perm('clientes'));
+create policy "equipe edita" on clients for update to authenticated using (has_perm('planejamentos') or has_perm('clientes')) with check (has_perm('planejamentos') or has_perm('clientes'));
+create policy "admin apaga"  on clients for delete to authenticated using (has_perm('clientes'));
+create policy "equipe" on plans    for all to authenticated using (has_perm('planejamentos')) with check (has_perm('planejamentos'));
+create policy "le"     on settings for select to authenticated using (true);
+create policy "grava"  on settings for all to authenticated using (has_perm('planejamentos')) with check (has_perm('planejamentos'));
+create policy "proprio ou admin" on team for select to authenticated using (lower(email) = lower(auth.jwt() ->> 'email') or has_perm('acessos'));
+create policy "admin" on team           for all to authenticated using (has_perm('acessos')) with check (has_perm('acessos'));
+create policy "admin" on client_private for all to authenticated using (has_perm('contratos')) with check (has_perm('contratos'));
+create policy "admin" on client_forms   for all to authenticated using (has_perm('contratos')) with check (has_perm('contratos'));
 
 -- Pasta das artes (as imagens abrem por link, para o arquivo do cliente funcionar)
 insert into storage.buckets (id, name, public)

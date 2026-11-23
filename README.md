@@ -22,12 +22,14 @@ Sem preencher o `config.js`, a página abre em **modo demonstração** (salva s�
 2. No menu lateral, abra **SQL Editor > New query**, cole todo o conteúdo de `supabase.sql` e clique em **Run**.
 3. **Feche o cadastro público** (importante, senão qualquer pessoa cria conta):
    **Authentication > Sign In / Providers** e desligue **Allow new users to sign up**.
-4. **Crie o login da equipe**: **Authentication > Users > Add user > Create new user**. Coloque e-mail e senha de cada pessoa e marque **Auto Confirm User**.
+4. **Crie só o login do administrador** (`adm@2ldigitalhub.com`): **Authentication > Users > Add user > Create new user**, com uma senha e **Auto Confirm User** marcado. Os outros logins você cria depois pelo próprio site.
 5. Copie as chaves em **Project Settings > API** (ou **Data API**):
    - **Project URL** → `SUPABASE_URL`
    - **anon public** → `SUPABASE_ANON_KEY`
 
    Cole no `config.js`. A chave *anon* pode ficar pública, quem protege os dados é o login.
+6. **Publique a função de acessos** (uma vez), para criar logins pelo site:
+   **Edge Functions > Deploy a new function > Via Editor**, nome `usuarios`, apague o exemplo, cole todo o conteúdo de `supabase/functions/usuarios/index.ts` e clique em **Deploy**. Não precisa criar nenhum segredo: a função já usa a chave interna do projeto, que nunca vai para o site.
 
 > O plano grátis tem 1 GB para imagens. As artes são comprimidas (cerca de 200 KB cada), o que dá uns 5 mil artes. Quando estiver enchendo, use **Ajustes > Apagar imagens antigas**. Os textos continuam salvos e os arquivos já enviados aos clientes não são afetados.
 
@@ -90,12 +92,14 @@ A aba **Clientes** substitui o controle no ClickUp. Cada cliente tem uma ficha c
 - **Pacote e entregáveis**, situação (onboarding, ativo, pausado, encerrado), dia de vencimento e início. **Toda a equipe vê.**
 - **Dados da empresa, representante legal, financeiro e contrato** (valor, forma de pagamento, taxa, fidelidade, observações do comercial). **Só administradores veem.** Isso é bloqueado no próprio banco, não só escondido na tela.
 
-**Acessos:** cada login tem um perfil.
-- **Administrador**: vê tudo, inclusive valores e contrato.
-- **Equipe**: planejamentos e clientes, sem valores.
-- **Só planejamentos**: cadastra clientes e edita pacotes pelos planejamentos, mas não vê a aba Clientes.
+**Acessos:** o administrador (`adm@2ldigitalhub.com`) gerencia tudo em **Ajustes > Gerenciar acessos**: cria o login de cada pessoa com nome, e-mail e senha, e marca o que ela pode usar.
+- **Planejamentos**: monta e envia o planejamento do mês, cadastra cliente e pacote.
+- **Clientes**: aba Clientes, sem valores.
+- **Valores e contratos**: valores, dados do contrato e formulário do cliente.
+- **Esteira de posts**.
+- **Administrador**: cria logins e define os acessos.
 
-O `supabase.sql` já coloca `adm@2ldigitalhub.com` e `criativo.2ldigitalhub@gmail.com` como administradores e `sm2.2ldigitalhub@gmail.com` como só planejamentos. Depois é só mudar em **Ajustes > Acessos** (a conta de login continua sendo criada no passo 1.4). Quem não está na lista entra como equipe.
+Ali também dá para trocar a senha de alguém ou excluir o acesso. Cada pessoa troca a própria senha em **Ajustes > Minha senha**. Quem não está na lista não vê nada. O `adm@2ldigitalhub.com` sempre tem tudo, mesmo que alguém mude: rodar o `supabase.sql` de novo devolve.
 
 **Cliente novo:**
 1. **Clientes > Novo cliente**. Ele já entra em *onboarding*, com o vencimento sugerido (começou dia 3, vence dia 10).

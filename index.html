@@ -281,14 +281,18 @@ function makeDemoStore(){
   return{
     demo:true,
     async session(){return true},
-    async myRole(){try{return localStorage.getItem("demo-role")||"admin"}catch(e){return"admin"}},
+    async myPerms(){try{const p=localStorage.getItem("demo-perms");return p?JSON.parse(p):PERMS.map(x=>x[0])}catch(e){return PERMS.map(x=>x[0])}},
+    async users(acao,b={}){const db=load();db.team=db.team||{};const me="voce@demo";db.team[me]=db.team[me]||{email:me,nome:"Você (demonstração)",perms:PERMS.map(x=>x[0]),login:true};
+      if(acao==="criar"||acao==="salvar")db.team[b.email]={...db.team[b.email],email:b.email,nome:b.nome,perms:b.perms,login:true};
+      if(acao==="excluir")delete db.team[b.email];
+      save(db);return{usuarios:Object.values(db.team),eu:me}},
+    async changePassword(){},
     async listPrivate(){return load().priv},
     async mergePrivate(cid,patch){const db=load();db.priv[cid]={...db.priv[cid],...patch};save(db);return db.priv[cid]},
     async listForms(){return Object.values(load().forms)},
     async createForm(cid){const db=load(),f={token:rid("t"),client_id:cid,created_at:new Date().toISOString(),submitted_at:null};db.forms[f.token]=f;save(db);return f},
     async formInfo(t){const db=load(),f=db.forms[t];return f?{name:db.clients[f.client_id]?.name||"",submitted:!!f.submitted_at}:null},
     async submitForm(t,payload){const db=load(),f=db.forms[t];if(!f||f.submitted_at)return false;f.submitted_at=new Date().toISOString();db.priv[f.client_id]={...db.priv[f.client_id],...payload};save(db);return true},
-    async listTeam(){return[]},async saveTeam(){},async deleteTeam(){},
     async listClients(){return Object.values(load().clients)},
     async saveClient(c){const db=load();if(!c.id)c.id=rid("c");db.clients[c.id]={...db.clients[c.id],...c};save(db);return db.clients[c.id]},
     async deleteClient(id){const db=load();delete db.clients[id];for(const k in db.plans)if(db.plans[k].client_id===id)delete db.plans[k];save(db)},
@@ -311,16 +315,21 @@ function makeSupaStore(){
     async session(){const{data}=await sb.auth.getSession();return !!data.session},
     async signIn(email,password){const{error}=await sb.auth.signInWithPassword({email,password});if(error)throw error},
     async signOut(){await sb.auth.signOut()},
-    async myRole(){return ok(await sb.rpc("my_role"))||"equipe"},
+    async myPerms(){return ok(await sb.rpc("my_perms"))||[]},
+    // logins são criados pela função "usuarios" no Supabase (precisa da chave secreta, que não pode ficar no site)
+    async users(acao,b={}){
+      const{data,error}=await sb.functions.invoke("usuarios",{body:{acao,...b}});
+      if(error){let m=error.message||"";try{const j=await error.context.json();if(j&&j.erro)m=j.erro}catch(_){}
+        if(/failed to send|not found|404|fetch/i.test(m))m="A função de acessos ainda não foi publicada no Supabase. Veja o README, passo 1.6.";
+        throw new Error(m)}
+      if(data&&data.erro)throw new Error(data.erro);return data},
+    async changePassword(password){const{error}=await sb.auth.updateUser({password});if(error)throw error},
     async listPrivate(){const out={};for(const r of ok(await sb.from("client_private").select("client_id,data")))out[r.client_id]=r.data||{};return out},
     async mergePrivate(cid,patch){return ok(await sb.rpc("merge_private",{cid,patch}))||{}},
     async listForms(){return ok(await sb.from("client_forms").select("*").order("created_at"))},
     async createForm(cid){return ok(await sb.from("client_forms").insert({client_id:cid}).select().single())},
     async formInfo(t){const{data,error}=await sb.rpc("onboarding_info",{t});if(error)return null;return data},
     async submitForm(t,payload){return ok(await sb.rpc("submit_onboarding",{t,payload}))===true},
-    async listTeam(){return ok(await sb.from("team").select("*").order("email"))},
-    async saveTeam(email,role){ok(await sb.from("team").upsert({email,role}))},
-    async deleteTeam(email){ok(await sb.from("team").delete().eq("email",email))},
     async listClients(){return ok(await sb.from("clients").select("*"))},
     async saveClient(c){const{id,...row}=c;
       return ok(await(id?sb.from("clients").update(row).eq("id",id):sb.from("clients").insert(row)).select().single())},
@@ -515,7 +524,9 @@ function renderTop(){
   const plan=S.view==="list"||S.view==="client";
   $("#mLabel").textContent=monthLabel(S.month);$("#logo").src=LOGO;
   $("#monthBox").classList.toggle("hidden",!S.loaded||!plan);$("#openSettings").classList.toggle("hidden",!S.loaded);
-  $("#tabs").classList.toggle("hidden",!S.loaded||S.planOnly);$("#brandSub").classList.toggle("hidden",S.loaded&&!S.planOnly);
+  const both=S.loaded&&can("planejamentos")&&canClients();
+  $("#tabs").classList.toggle("hidden",!both);$("#brandSub").classList.toggle("hidden",both);
+  if(S.loaded)$("#brandSub").textContent=can("planejamentos")?"Planejamentos":"Clientes";
   $("#tabs").querySelectorAll("button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.tab==="plan"?plan:!plan)));
   updateSaveState();
 }
@@ -931,7 +942,7 @@ function renderFicha(){
     <div class="ehead"><div class="grow"><h1>${esc(c.name)}</h1>
       <p class="sub">${STATUS[st]}${c.due_day?` · vence todo dia ${+c.due_day}`:""}${c.start_date?` · cliente desde ${brDate(c.start_date)}`:""}</p>
       <div class="pkgline">${pkgChips(c)}</div></div>
-      ${live(c)?`<button class="btn ghost" id="toPlan">Abrir planejamento</button>`:""}</div>
+      ${live(c)&&can("planejamentos")?`<button class="btn ghost" id="toPlan">Abrir planejamento</button>`:""}</div>
 
     <section class="sec" id="pkgSec">
       <div class="sechead"><h2>Pacote e entregáveis</h2><span class="count">Toda a equipe vê esta parte</span></div>
@@ -991,7 +1002,7 @@ function renderFicha(){
       <div id="d4">${d4HTML(c,p)}</div>
     </section>`:""}
 
-    <div class="foot" style="display:flex;gap:10px;flex-wrap:wrap">${admin?`<button class="btn danger small" id="delClient">Excluir cliente</button>`:""}</div>`;
+    <div class="foot" style="display:flex;gap:10px;flex-wrap:wrap">${can("clientes")?`<button class="btn danger small" id="delClient">Excluir cliente</button>`:""}</div>`;
   bindFicha(c);
 }
 function bindFicha(c){
@@ -1012,6 +1023,11 @@ function bindFicha(c){
   $("#kStart").onchange=chg(()=>{c.start_date=$("#kStart").value||null},true);
   const kc=$("#kCal");if(kc)kc.oninput=()=>{c.calendar_name=kc.value.trim();saveClientSoon(c)};
   $("#kNotes").oninput=e=>{c.pkg_notes=e.target.value;saveClientSoon(c)};
+  const dc=$("#delClient");if(dc)dc.onclick=async()=>{
+    if(!confirm(`Excluir ${c.name}? A ficha, o contrato e todos os planejamentos dele serão apagados.`))return;
+    try{flushTimers();await store.deleteClient(cid);S.clients=S.clients.filter(x=>x.id!==cid);delete S.plans[cid];delete S.priv[cid];renderClients()}
+    catch(e){toast("Não foi possível excluir.")}
+  };
   if(!S.admin)return;
 
   const priv=$("#privSec");
@@ -1031,11 +1047,6 @@ function bindFicha(c){
     catch(e){console.error(e);toast("Não foi possível gerar o link.");nf.disabled=false}
   };
   const cf=$("#copyForm");if(cf)cf.onclick=async()=>{const u=$("#formLink").value;if(await copyText(u))toast("Link copiado.");else msgModal(u)};
-  $("#delClient").onclick=async()=>{
-    if(!confirm(`Excluir ${c.name}? A ficha, o contrato e todos os planejamentos dele serão apagados.`))return;
-    try{flushTimers();await store.deleteClient(cid);S.clients=S.clients.filter(x=>x.id!==cid);delete S.plans[cid];delete S.priv[cid];renderClients()}
-    catch(e){toast("Não foi possível excluir.")}
-  };
 }
 
 /* ---- formulário que o cliente preenche (abre pelo link, sem login) ---- */
@@ -1085,7 +1096,7 @@ function clientModal(c){
       <label class="toggle"><span>Social media</span><input type="checkbox" id="fSoc" ${c.social?"checked":""}></label>
       <p class="hint">O pacote fica salvo e vale para todos os meses. Só mude se o cliente trocar de plano.</p>
     </div>
-    <div class="foot">${isNew||!S.admin?"":`<button class="btn danger" id="fDel">Excluir cliente</button>`}<span class="spacer"></span>
+    <div class="foot">${isNew||!can("clientes")?"":`<button class="btn danger" id="fDel">Excluir cliente</button>`}<span class="spacer"></span>
       <button class="btn ghost" id="fCancel">Cancelar</button><button class="btn primary" id="fSave">${isNew?"Cadastrar":"Salvar"}</button></div>`);
   $("#fName",w).focus();
   const upd=()=>{const h=$("#fCalHint",w);if(!h)return;const ph=clientPhrases({name:$("#fName",w).value,calendar_name:$("#fCal",w).value});h.textContent=ph.length?"Na agenda vamos procurar por: "+ph.map(x=>"“"+x.d+"”").join(", ")+". Só preencha se o nome lá for bem diferente.":""};
@@ -1112,28 +1123,68 @@ function clientModal(c){
     catch(e){toast("Não foi possível excluir.")}
   };
 }
-// perfil de cada login; o login em si é criado no Supabase
-const ROLES={admin:"Administrador",equipe:"Equipe",planejamento:"Só planejamentos"};
-async function teamBox(box){
-  let rows=[];try{rows=await store.listTeam()}catch(e){box.innerHTML=`<p class="hint">Não foi possível carregar.</p>`;return}
-  const sel=(v,attr)=>`<select class="in" ${attr} style="width:auto">${Object.entries(ROLES).map(([k,t])=>`<option value="${k}" ${k===v?"selected":""}>${t}</option>`).join("")}</select>`;
-  box.innerHTML=rows.map(r=>`<div class="rowbtns"><span style="flex:1;min-width:160px;font-size:13.5px;word-break:break-all">${esc(r.email)}</span>${sel(r.role,`data-role="${esc(r.email)}"`)}<button class="btn ghost small" data-rm="${esc(r.email)}">Tirar</button></div>`).join("")
-    +`<div class="rowbtns"><input class="in" id="tEmail" type="email" placeholder="e-mail de login" style="flex:1;min-width:160px">${sel("planejamento",'id="tRole"')}<button class="btn ghost small" id="tAdd">Adicionar</button></div>
-    <p class="hint"><b>Administrador</b> vê tudo, inclusive valores e contrato. <b>Equipe</b> vê planejamentos e clientes, sem valores. <b>Só planejamentos</b> cadastra clientes e pacotes pelos planejamentos, mas não vê a aba Clientes. Quem não está na lista entra como equipe.</p>`;
-  const admins=()=>rows.filter(r=>r.role==="admin").length;
-  box.querySelectorAll("[data-role]").forEach(s=>s.onchange=async()=>{
-    const r=rows.find(x=>x.email===s.dataset.role);
-    if(r.role==="admin"&&s.value!=="admin"&&admins()<2){toast("Precisa ficar pelo menos um administrador.");s.value="admin";return}
-    try{await store.saveTeam(r.email,s.value);r.role=s.value;toast("Acesso atualizado.")}catch(e){toast("Não foi possível mudar.");s.value=r.role}
-  });
-  box.querySelectorAll("[data-rm]").forEach(b=>b.onclick=async()=>{
-    const r=rows.find(x=>x.email===b.dataset.rm);
-    if(r.role==="admin"&&admins()<2){toast("Precisa ficar pelo menos um administrador.");return}
-    if(!confirm(`Tirar ${r.email} da lista? Ele passa a entrar como equipe.`))return;
-    try{await store.deleteTeam(r.email);teamBox(box)}catch(e){toast("Não foi possível tirar.")}
-  });
-  $("#tAdd",box).onclick=async()=>{const e=$("#tEmail",box).value.trim().toLowerCase();if(!/^\S+@\S+\.\S+$/.test(e)){toast("Coloque um e-mail válido.");return}
-    try{await store.saveTeam(e,$("#tRole",box).value);teamBox(box)}catch(err){toast("Não foi possível adicionar.")}};
+// o que cada login pode usar (igual ao supabase.sql e à função "usuarios")
+const PERMS=[
+  ["planejamentos","Planejamentos","Monta e envia o planejamento do mês. Cadastra cliente e pacote."],
+  ["clientes","Clientes","Vê a aba Clientes: pacote, situação e vencimento, sem valores."],
+  ["contratos","Valores e contratos","Vê valores, dados do contrato e gera o formulário do cliente."],
+  ["esteira","Esteira de posts","Usa a esteira de artes."],
+  ["acessos","Administrador","Cria logins e define o que cada pessoa pode usar."]];
+const PERM_LABEL=Object.fromEntries(PERMS.map(([k,t])=>[k,t]));
+const newPassword=()=>{const a="abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";let s="";const r=crypto.getRandomValues(new Uint32Array(10));for(const n of r)s+=a[n%a.length];return s};
+function usersModal(){
+  const w=modal(`<h2>Acessos</h2><div id="uBox"><p class="hint">Carregando…</p></div>`);
+  $(".sheet",w).style.maxWidth="640px";
+  const box=$("#uBox",w);let list=[],eu="";
+  const fail=e=>{box.innerHTML=`<p class="hint">${esc(e.message||e)}</p><div class="foot"><span class="spacer"></span><button class="btn ghost" id="uClose">Fechar</button></div>`;$("#uClose",box).onclick=()=>w.remove()};
+  const load=async()=>{box.innerHTML=`<p class="hint">Carregando…</p>`;try{const r=await store.users("listar");list=r.usuarios||[];eu=r.eu||"";paint()}catch(e){fail(e)}};
+  const paint=()=>{
+    box.innerHTML=`<p class="hint" style="margin:-6px 0 14px">Cada pessoa entra com o próprio e-mail e senha. Clique em alguém para mudar o que pode usar, trocar a senha ou tirar o acesso.</p>
+      <div class="clients">${list.map((u,i)=>`<button class="row" data-i="${i}"><div><div class="name">${esc(u.nome||u.email)}</div>
+        <div class="pkg">${u.nome?esc(u.email)+" · ":""}${u.perms.length?u.perms.map(p=>PERM_LABEL[p]||p).join(", "):"Sem acesso a nada"}</div></div>
+        <span class="pill">${u.email===eu?"Você":!u.login?"Sem login":u.ultimo?"Entrou "+new Date(u.ultimo).toLocaleDateString("pt-BR"):"Nunca entrou"}</span></button>`).join("")}</div>
+      <div class="foot"><button class="btn ghost" id="uClose">Fechar</button><span class="spacer"></span><button class="btn primary" id="uNew">Novo acesso</button></div>`;
+    box.querySelectorAll("[data-i]").forEach(b=>b.onclick=()=>form(list[+b.dataset.i]));
+    $("#uClose",box).onclick=()=>w.remove();$("#uNew",box).onclick=()=>form(null);
+  };
+  const form=u=>{
+    const isNew=!u;u=u||{email:"",nome:"",perms:["planejamentos"],login:false};
+    const self=u.email===eu,needPass=isNew||!u.login;
+    box.innerHTML=`<div class="form">
+      <div class="two"><label class="field"><span>Nome</span><input class="in" id="uNome" value="${esc(u.nome)}" placeholder="Ex.: Social media"></label>
+      <label class="field"><span>E-mail de login</span><input class="in" id="uEmail" type="email" value="${esc(u.email)}" ${isNew?"":"readonly"}></label></div>
+      <div class="field"><span>Pode usar</span><div class="form" style="gap:8px">${PERMS.map(([k,t,d])=>`<label class="toggle"><span><b style="font-weight:600">${t}</b><br><span class="hint">${d}</span></span><input type="checkbox" data-p="${k}" ${u.perms.includes(k)?"checked":""} ${self&&k==="acessos"?"disabled":""}></label>`).join("")}</div></div>
+      <label class="field"><span>${needPass?"Senha":"Nova senha (deixe vazio para manter a atual)"}</span>
+        <div class="linkbox"><input class="in" id="uSenha" type="text" autocomplete="new-password" spellcheck="false" placeholder="mínimo 8 caracteres"><button class="btn ghost small" id="uGen" type="button">Gerar senha</button></div></label>
+      <p class="hint">Ao salvar com senha, o login e a senha são copiados para você mandar para a pessoa. Ela pode trocar a senha depois em Ajustes.</p></div>
+      <div class="foot">${!isNew&&!self?`<button class="btn danger" id="uDel">Excluir acesso</button>`:""}<span class="spacer"></span>
+        <button class="btn ghost" id="uBack">Voltar</button><button class="btn primary" id="uSave">${isNew?"Criar acesso":"Salvar"}</button></div>`;
+    if(isNew)$("#uEmail",box).focus();
+    $("#uGen",box).onclick=()=>{$("#uSenha",box).value=newPassword()};
+    $("#uBack",box).onclick=paint;
+    $("#uSave",box).onclick=async()=>{
+      const email=$("#uEmail",box).value.trim().toLowerCase(),nome=$("#uNome",box).value.trim(),senha=$("#uSenha",box).value.trim();
+      const perms=[...box.querySelectorAll("[data-p]:checked")].map(x=>x.dataset.p);
+      if(!/^\S+@\S+\.\S+$/.test(email)){toast("Coloque um e-mail válido.");return}
+      if(isNew&&list.some(x=>x.email===email)){toast("Esse e-mail já está na lista.");return}
+      if((needPass||senha)&&senha.length<8){toast(needPass?"Defina uma senha com pelo menos 8 caracteres.":"A senha nova precisa ter pelo menos 8 caracteres.");$("#uSenha",box).focus();return}
+      const b=$("#uSave",box);b.disabled=true;b.textContent="Salvando…";
+      try{
+        if(needPass)await store.users("criar",{email,nome,perms,senha});
+        else{await store.users("salvar",{email,nome,perms});if(senha)await store.users("senha",{email,senha})}
+        if(senha){const t=`Acesso à plataforma 2L\n${location.origin+location.pathname}\nE-mail: ${email}\nSenha: ${senha}`;
+          if(await copyText(t))toast("Acesso salvo. O login e a senha foram copiados.",5000);else msgModal(t,"Acesso salvo","Copie e mande para a pessoa. A senha não aparece de novo depois.")}
+        else toast("Acesso salvo.");
+        if(self)S.perms=perms;
+        await load();
+      }catch(e){toast(e.message||"Não foi possível salvar.",6000);b.disabled=false;b.textContent=isNew?"Criar acesso":"Salvar"}
+    };
+    const del=$("#uDel",box);if(del)del.onclick=async()=>{
+      if(!confirm(`Excluir o acesso de ${u.email}? A pessoa não consegue mais entrar. Os planejamentos e clientes não são apagados.`))return;
+      try{await store.users("excluir",{email:u.email});toast("Acesso excluído.");await load()}catch(e){toast(e.message||"Não foi possível excluir.",6000)}
+    };
+  };
+  load();
 }
 function themeSelect(w){
   let theme="";try{theme=localStorage.getItem("theme")||""}catch(e){}
@@ -1141,42 +1192,44 @@ function themeSelect(w){
   $("#sTheme",w).onchange=e=>{applyTheme(e.target.value);try{localStorage.setItem("theme",e.target.value)}catch(_){}};
 }
 function settingsModal(){
-  if(S.planOnly){
-    const w=modal(`<h2>Ajustes</h2><div class="form">
-      <label class="field"><span>Tema desta tela</span><select class="in" id="sTheme"><option value="">Igual ao aparelho</option><option value="light">Claro</option><option value="dark">Escuro</option></select></label></div>
-      <div class="foot">${store.demo?"":`<button class="btn ghost" id="sOut">Sair</button>`}<span class="spacer"></span><button class="btn primary" id="sCancel">Fechar</button></div>`);
-    themeSelect(w);$("#sCancel",w).onclick=()=>w.remove();
-    const out=$("#sOut",w);if(out)out.onclick=async()=>{await store.signOut();location.reload()};
-    return;
-  }
-  const s=settings();
+  const s=settings(),plan=can("planejamentos");
   const w=modal(`<h2>Ajustes</h2>
     <div class="form">
-      <h3>Contatos no fim do planejamento</h3>
+      ${plan?`<h3>Contatos no fim do planejamento</h3>
       <label class="field"><span>Instagram</span><input class="in" id="sIg" value="${esc(s.instagram)}"></label>
       <label class="field"><span>Site</span><input class="in" id="sSite" value="${esc(s.site)}"></label>
       <label class="field"><span>WhatsApp</span><input class="in" id="sWa" value="${esc(s.whatsapp)}"></label>
       ${gEnabled()?`<h3>Google Agenda</h3>
       <label class="field"><span>Só puxar eventos que tenham esta palavra (opcional)</span><input class="in" id="sKw" value="${esc(s.keyword)}" placeholder="Ex.: gravação"><p class="hint">Útil se o nome do cliente também aparece em reuniões. Deixe vazio para puxar todos os eventos com o nome dele.</p></label>
       <label class="field"><span>Feriados locais (um por linha)</span><textarea class="in" id="sHol" rows="2" placeholder="10/12 Aniversário de Londrina">${esc(s.holidays||"")}</textarea><p class="hint">Os feriados nacionais já são marcados sozinhos. Gravações em feriado aparecem como “a definir”.</p></label>`
-      :`<p class="hint">A Google Agenda ainda não está ligada. Veja o passo 4 do README.</p>`}
-      ${S.admin&&!store.demo?`<h3>Acessos</h3><div id="sTeam" class="form" style="gap:8px"><p class="hint">Carregando…</p></div>`:""}
-      <h3>Dados</h3>
+      :`<p class="hint">A Google Agenda ainda não está ligada. Veja o passo 4 do README.</p>`}`:""}
+      ${can("acessos")?`<h3>Acessos</h3><p class="hint">Crie os logins da equipe e defina o que cada pessoa pode usar.</p>
+      <div class="rowbtns"><button class="btn ghost small" id="sUsers">Gerenciar acessos</button></div>`:""}
+      ${plan?`<h3>Dados</h3>
       <div class="rowbtns"><button class="btn ghost small" id="sBackup">Baixar backup</button>
         <select class="in" id="sOld" style="width:auto"><option value="3">mais de 3 meses</option><option value="6" selected>mais de 6 meses</option><option value="12">mais de 12 meses</option></select>
         <button class="btn ghost small" id="sClean">Apagar imagens antigas</button></div>
-      <p class="hint">Apagar imagens libera espaço no Supabase. Os textos e os arquivos já enviados aos clientes continuam.</p>
+      <p class="hint">Apagar imagens libera espaço no Supabase. Os textos e os arquivos já enviados aos clientes continuam.</p>`:""}
+      ${store.demo?"":`<h3>Minha senha</h3>
+      <div class="linkbox"><input class="in" id="sPass" type="password" autocomplete="new-password" placeholder="nova senha (mínimo 8 caracteres)"><button class="btn ghost small" id="sPassBtn">Trocar senha</button></div>`}
       <label class="field"><span>Tema desta tela</span><select class="in" id="sTheme"><option value="">Igual ao aparelho</option><option value="light">Claro</option><option value="dark">Escuro</option></select></label>
     </div>
-    <div class="foot">${store.demo?"":`<button class="btn ghost" id="sOut">Sair</button>`}<span class="spacer"></span><button class="btn ghost" id="sCancel">Cancelar</button><button class="btn primary" id="sSave">Salvar</button></div>`);
-  if($("#sTeam",w))teamBox($("#sTeam",w));
+    <div class="foot">${store.demo?"":`<button class="btn ghost" id="sOut">Sair</button>`}<span class="spacer"></span>${plan?`<button class="btn ghost" id="sCancel">Cancelar</button><button class="btn primary" id="sSave">Salvar</button>`:`<button class="btn primary" id="sCancel">Fechar</button>`}</div>`);
   themeSelect(w);
   $("#sCancel",w).onclick=()=>w.remove();
+  const su=$("#sUsers",w);if(su)su.onclick=()=>{w.remove();usersModal()};
+  const out=$("#sOut",w);if(out)out.onclick=async()=>{await store.signOut();location.reload()};
+  const pb=$("#sPassBtn",w);if(pb)pb.onclick=async()=>{
+    const p=$("#sPass",w).value;if(p.length<8){toast("A senha precisa ter pelo menos 8 caracteres.");return}
+    pb.disabled=true;
+    try{await store.changePassword(p);$("#sPass",w).value="";toast("Senha trocada.")}catch(e){toast("Não foi possível trocar a senha."+(e&&e.message?" ("+e.message+")":""),6000)}
+    pb.disabled=false;
+  };
+  if(!plan)return;
   $("#sSave",w).onclick=async()=>{
     const data={instagram:$("#sIg",w).value.trim(),site:$("#sSite",w).value.trim(),whatsapp:$("#sWa",w).value.trim(),keyword:($("#sKw",w)?.value??s.keyword).trim(),holidays:($("#sHol",w)?.value??s.holidays??"").trim()};
     try{await store.saveSettings(data);S.settings=data;w.remove();toast("Ajustes salvos.")}catch(e){toast("Não foi possível salvar os ajustes.")}
   };
-  const out=$("#sOut",w);if(out)out.onclick=async()=>{await store.signOut();location.reload()};
   $("#sBackup",w).onclick=async()=>{
     try{const data=await store.dumpAll();saveFile(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),`backup-planejamentos-${new Date().toISOString().slice(0,10)}.json`);toast("Backup baixado.")}
     catch(e){toast("Não foi possível gerar o backup.")}
@@ -1357,9 +1410,9 @@ function openPreview(){
   $("#pvClose",w).onclick=()=>w.remove();
 }
 // quando o navegador não deixa copiar sozinho
-function msgModal(msg){
-  const w=modal(`<h2>Mensagem para o grupo</h2><div class="form"><textarea class="in" id="mText" rows="12">${esc(msg)}</textarea>
-    <p class="hint">Copie, cole no grupo do cliente junto com o arquivo e fixe a mensagem por 30 dias.</p></div>
+function msgModal(msg,title="Mensagem para o grupo",hint="Copie, cole no grupo do cliente junto com o arquivo e fixe a mensagem por 30 dias."){
+  const w=modal(`<h2>${esc(title)}</h2><div class="form"><textarea class="in" id="mText" rows="${Math.min(12,msg.split("\n").length+2)}">${esc(msg)}</textarea>
+    <p class="hint">${esc(hint)}</p></div>
     <div class="foot"><span class="spacer"></span><button class="btn ghost" id="mClose">Fechar</button><button class="btn primary" id="mCopy">Copiar</button></div>`);
   $("#mClose",w).onclick=()=>w.remove();
   $("#mCopy",w).onclick=async()=>{if(await copyText($("#mText",w).value)){toast("Mensagem copiada.");w.remove()}else{$("#mText",w).select();toast("Selecionei o texto, use Ctrl+C.")}};
@@ -1393,14 +1446,23 @@ async function deliver(mode){
 }
 
 /* =================== BOOT =================== */
+const can=p=>(S.perms||[]).includes(p);
+const canClients=()=>can("clientes")||can("contratos");
+// primeira tela conforme o que o login pode usar
+function home(){
+  if(can("planejamentos")){S.view="list";renderList()}
+  else if(canClients())renderClients();
+  else{S.view="none";renderTop();$("#layer").innerHTML="";
+    $("#main").innerHTML=`<div class="empty"><strong>Seu login ainda não tem acesso</strong>Peça para o administrador liberar em Ajustes &gt; Acessos.</div>`}
+}
 async function loadAll(){
   $("#main").innerHTML=`<div class="loading">Carregando…</div>`;
   try{
-    const[clients,plans,st,role]=await Promise.all([store.listClients(),store.listPlans(S.month),store.getSettings(),
-      store.myRole().catch(e=>{console.error(e);S.adminErr=true;return"equipe"})]);
-    S.clients=clients;S.plans=plans;S.settings=st||{};S.admin=role==="admin";S.planOnly=role==="planejamento";
+    const[clients,plans,st,perms]=await Promise.all([store.listClients(),store.listPlans(S.month),store.getSettings(),
+      store.myPerms().catch(e=>{console.error(e);S.adminErr=true;return["planejamentos","clientes"]})]);
+    S.clients=clients;S.plans=plans;S.settings=st||{};S.perms=perms;S.admin=can("contratos");
     if(S.admin)await refreshPrivate().catch(e=>{console.error(e);S.adminErr=true});
-    S.loaded=true;renderList();
+    S.loaded=true;home();
   }catch(e){console.error(e);$("#main").innerHTML=`<div class="empty"><strong>Não foi possível carregar os dados</strong>Confira a internet e os dados do config.js. <br><br><button class="btn primary" onclick="loadAll()">Tentar de novo</button></div>`}
 }
 async function changeMonth(n){
