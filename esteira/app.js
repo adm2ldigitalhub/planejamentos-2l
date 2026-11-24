@@ -122,7 +122,7 @@ function viewLogin() {
   };
 }
 function renderTabs(v) {
-  const tabs = [["fila", "Posts"], ["comunicado", "Comunicados"], ["lojas", "Lojas"]];
+  const tabs = [["fila", "Posts"], ["lojas", "Templates"]];
   $("#tabs").innerHTML = tabs.map(([k, l]) => `<a href="#${k}" class="${v === k ? "on" : ""}">${l}</a>`).join("");
 }
 let leaveHooks = [];
@@ -130,7 +130,7 @@ function route() {
   leaveHooks.forEach(f => { try { f(); } catch (e) {} }); leaveHooks = [];
   const [v, ...rest] = (location.hash.slice(1) || "fila").split("/");
   const arg = rest.length ? decodeURIComponent(rest.join("/")) : null;
-  renderTabs(v === "post" || v === "novo" ? "fila" : v === "ajustar" ? "lojas" : v);
+  renderTabs(v === "post" || v === "novo" || v === "comunicado" ? "fila" : v === "ajustar" ? "lojas" : v);
   window.scrollTo(0, 0);
   const views = { fila: viewFila, novo: viewNovo, post: viewPost, comunicado: viewComunicado, lojas: viewLojas, ajustar: viewAjustar };
   Promise.resolve((views[v] || viewFila)(arg)).catch(erro);
@@ -286,7 +286,11 @@ function ordenarPosts(lista, ord) {
 async function viewFila(filtroLote) {
   const m = $("#main");
   const ord = memo("ordem") || { k: "atualizado", dir: -1 };
-  m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Posts</h1><a class="btn primary" href="#novo">+ Novo lote</a></div>
+  // duas listas separadas: anúncios e vendidos (lotes de carros) e comunicados
+  const aba = memo("aba") === "comunicados" ? "comunicados" : "anuncios", com = aba === "comunicados";
+  const doGrupo = p => (p.tipo === "comunicado") === com;
+  m.innerHTML = `<div class="row" style="margin-bottom:10px"><h1 class="grow" style="margin:0">Posts</h1><a class="btn primary" href="${com ? "#comunicado" : "#novo"}">${com ? "+ Novo comunicado" : "+ Novo lote"}</a></div>
+    <nav class="subtabs"><button data-aba="anuncios" class="${com ? "" : "on"}">Anúncios e vendidos</button><button data-aba="comunicados" class="${com ? "on" : ""}">Comunicados</button></nav>
     <p class="sub">Clique no post para revisar; dentro dele dá para ir para o próximo. Ou marque vários para mudar o status, baixar ou salvar no Drive de uma vez.</p>
     <div class="row" style="margin-bottom:12px">
       <select id="fs" style="max-width:220px"><option value="">Em andamento (sem concluídos)</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}">Só ${v.toLowerCase()}</option>`).join("")}<option value="*">Todos, com concluídos</option></select>
@@ -296,6 +300,8 @@ async function viewFila(filtroLote) {
     </div><div id="lista"><p class="muted">Carregando…</p></div><div id="selbar"></div>`;
   const f0 = memo("filtro") || {};
   $("#fs").value = f0.fs || ""; $("#fl").value = f0.fl || ""; $("#fq").value = f0.fq || "";
+  if (com) $("#fq").placeholder = "Buscar loja ou texto…";
+  $$("[data-aba]").forEach(b => b.onclick = () => { if (b.dataset.aba === aba) return; memo("aba", b.dataset.aba); memo("seq", null); viewFila(filtroLote); });
   let posts = [], vis = [];
   const marcados = new Set();
   async function carregar() {
@@ -317,12 +323,15 @@ async function viewFila(filtroLote) {
       <button class="btn small ghost" id="sLimpa">Limpar</button>
       <select id="sSt" style="width:auto"><option value="">Mudar status para…</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
       <button class="btn small" id="sZip">Baixar (.zip)</button><button class="btn small primary" id="sDrv">Salvar no Drive</button>
+      <button class="btn small" id="sConc" title="Marca como concluído e tira da lista">Concluir ✓</button>
+      <button class="btn small ghost" disabled title="Em breve: posta direto no Instagram de cada loja">Postar (em breve)</button>
       <span class="small muted" id="sProg" style="width:100%"></span></div>` : "";
     if (!n) return;
     $("#sLimpa").onclick = () => { marcados.clear(); desenhar(); };
     const sel = () => vis.filter(p => marcados.has(p.id)).concat(posts.filter(p => marcados.has(p.id) && !vis.includes(p)));
     const prog = t => { $("#sProg").textContent = t; };
     $("#sSt").onchange = async e => { const st = e.target.value; if (!st) return; try { await mudarStatus(st, [...marcados]); } catch (err) { erro(err); } };
+    $("#sConc").onclick = async () => { try { await mudarStatus("concluido", [...marcados]); } catch (err) { erro(err); } };
     $("#sZip").onclick = async () => {
       const b = $("#sZip"); b.disabled = true;
       try {
@@ -353,11 +362,11 @@ async function viewFila(filtroLote) {
   function desenhar() {
     const fs = $("#fs").value, fl = $("#fl").value, fq = norm($("#fq").value);
     memo("filtro", { fs, fl, fq: $("#fq").value });
-    vis = ordenarPosts(posts.filter(p => (fs === "*" || (fs ? stDe(p.status) === fs : stDe(p.status) !== "concluido")) && (!fl || p.loja === fl)
+    vis = ordenarPosts(posts.filter(p => doGrupo(p) && (fs === "*" || (fs ? stDe(p.status) === fs : stDe(p.status) !== "concluido")) && (!fl || p.loja === fl)
       && (!fq || norm(tituloPost(p) + " " + lojaLabel(p.loja)).includes(fq))), ord);
-    const ocultos = fs === "" ? posts.filter(p => stDe(p.status) === "concluido").length : 0;
+    const ocultos = fs === "" ? posts.filter(p => doGrupo(p) && stDe(p.status) === "concluido").length : 0;
     if (!vis.length) {
-      $("#lista").innerHTML = `<div class="empty"><strong>Nada por aqui</strong>${ocultos ? `${ocultos} concluído(s) escondido(s) (<a href="#" id="verConc">mostrar</a>). ` : ""}Clique em <b>+ Novo lote</b> e arraste os ZIPs do WhatsApp.</div>`;
+      $("#lista").innerHTML = `<div class="empty"><strong>Nada por aqui</strong>${ocultos ? `${ocultos} concluído(s) escondido(s) (<a href="#" id="verConc">mostrar</a>). ` : ""}${com ? "Clique em <b>+ Novo comunicado</b> para escrever um." : "Clique em <b>+ Novo lote</b> e arraste os ZIPs do WhatsApp."}</div>`;
       $("#verConc") && ($("#verConc").onclick = e => { e.preventDefault(); $("#fs").value = "*"; desenhar(); });
       barra(); return;
     }
@@ -500,7 +509,7 @@ async function viewNovo() {
       // IA em segundo plano (se configurada): processa o lote
       $("#progtxt").textContent = "Lendo as mensagens com IA…";
       await processarLoteIA(lote.id, (n, t) => { $("#progtxt").textContent = `Lendo as mensagens com IA (${n}/${t})…`; $("#progbar").style.width = (100 * n / t) + "%"; });
-      toast("Lote criado!"); location.hash = "fila/" + lote.id;
+      toast("Lote criado!"); memo("aba", "anuncios"); location.hash = "fila/" + lote.id;
     } catch (e) { erro(e); $("#criar").disabled = false; }
   };
 }
@@ -550,10 +559,11 @@ async function viewPost(id) {
   if (P.ordem == null) P.ordem = (P.fotos || []).map((_, i) => i).filter(i => i !== (P.capa || 0));
   const vars = variacoes(P.loja, P.tipo);
   // anterior / próximo: a mesma ordem da lista de Posts (ou os em andamento, se abriu direto pelo link)
+  memo("aba", comunicado ? "comunicados" : "anuncios");   // o "← Posts" volta para a lista certa
   let seq = memo("seq") || [];
   if (!seq.includes(id)) {
     const ps = ok(await sb.from("esteira_posts").select("id,status,loja,tipo,dados,created_at,updated_at").order("created_at", { ascending: false }).limit(400));
-    seq = ordenarPosts(ps.filter(p => stDe(p.status) !== "concluido" || p.id === id), memo("ordem") || { k: "atualizado", dir: -1 }).map(p => p.id);
+    seq = ordenarPosts(ps.filter(p => (p.tipo === "comunicado") === comunicado && (stDe(p.status) !== "concluido" || p.id === id)), memo("ordem") || { k: "atualizado", dir: -1 }).map(p => p.id);
     memo("seq", seq);
   }
   const pos = Math.max(0, seq.indexOf(id)), ant = seq[pos - 1], prox = seq[pos + 1];
@@ -826,7 +836,7 @@ async function enquadrarCarro(tpl, img) {
 // ---------------- COMUNICADOS ----------------
 async function viewComunicado() {
   const lojas = lojasCom("comunicado");
-  $("#main").innerHTML = `<h1>Comunicados</h1><p class="sub">Escreva o assunto uma vez, marque as lojas e a IA escreve um texto diferente para cada uma. Depois é só revisar na fila.</p>
+  $("#main").innerHTML = `<a href="#fila" class="muted small">← Posts</a><h1>Novo comunicado</h1><p class="sub">Escreva o assunto uma vez, marque as lojas e a IA escreve um texto diferente para cada uma. Depois é só revisar em Posts <h1>Comunicados</h1><p class="sub">Escreva o assunto uma vez, marque as lojas e a IA escreve um texto diferente para cada uma. Depois é só revisar na fila.</p>gt; Comunicados.</p>
     <div class="card" style="margin-bottom:12px"><label class="f">Assunto</label><textarea id="ass" rows="4" placeholder="Ex.: sexta 20/11 feriado da Consciência Negra, loja fechada, volta sábado normal"></textarea>
       <label style="display:flex;gap:8px;align-items:center;margin-top:8px" class="small"><input type="checkbox" id="mesmo"> Usar exatamente este texto em todas (sem IA)</label></div>
     <div class="card"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Lojas (${lojas.length}) <span class="small muted" id="nmarc"></span></h2>
@@ -854,7 +864,7 @@ async function viewComunicado() {
       }
       const lote = ok(await sb.from("esteira_lotes").insert({ nome: "Comunicado: " + assunto.slice(0, 40) }).select().single());
       ok(await sb.from("esteira_posts").insert(sel.map(n => ({ lote_id: lote.id, loja: n, tipo: "comunicado", status: "novo", mensagem: assunto, dados: { comunicado: textos[n] || assunto } }))));
-      toast("Comunicados criados!"); location.hash = "fila/" + lote.id;
+      toast("Comunicados criados!"); memo("aba", "comunicados"); location.hash = "fila/" + lote.id;
     } catch (e) { erro(e); $("#gerar").disabled = false; }
   };
 }
@@ -890,7 +900,7 @@ async function viewLojas() {
   const tpLoja = n => S.tpls.filter(t => t.loja === n && t.tipo !== "fundo");
   const lista = [...S.lojas].sort((a, b) => lojaLabel(a.nome).localeCompare(lojaLabel(b.nome), "pt-BR"));
   const semCli = lista.filter(l => !l.client_id).length;
-  m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Lojas</h1>${S.admin ? `<button class="btn primary" id="novoTpl">+ Template</button>` : ""}</div>
+  m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Templates</h1>${S.admin ? `<button class="btn primary" id="novoTpl">+ Template</button>` : ""}</div>
     <p class="sub">Cada loja é um cliente do 2L Core com os templates dele. Clique na loja para ver o Drive, o modelo de legenda e as artes.${S.admin ? "" : " Só administradores alteram esta parte."}</p>
     ${semCli && S.admin ? `<div class="lockbar">${semCli} loja(s) sem cliente ligado. Abra a loja e escolha o cliente, ou <button class="btn small ghost" id="vinc">Ligar pelo nome</button></div>` : ""}
     <div class="row" style="margin-bottom:12px"><input id="lq" class="search" placeholder="Buscar loja…"></div>

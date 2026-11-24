@@ -18,7 +18,7 @@ bucket privado `esteira`. Ele não mexe nas tabelas do planejamento.
    python build/montar_templates.py
    python build/montar_fontes.py
    ```
-2. Abra a esteira, vá em **Lojas > Importar pacote de templates do computador** e escolha a pasta **esteira-2l**.
+2. Abra a esteira, vá em **Templates > Importar pacote de templates do computador** e escolha a pasta **esteira-2l**.
 3. Clique em **Ligar pelo nome** e abra as lojas que ficaram "sem cliente" para escolher à mão.
 4. Abra cada loja e preencha os campos abaixo:
    - **ID da pasta do Drive**: o código no fim do link da pasta da loja.
@@ -59,7 +59,8 @@ Use o mesmo projeto do Google Cloud da Agenda.
 6. Crie os segredos `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` e `GOOGLE_REFRESH_TOKEN`.
 
 ## Como usar
-- **Posts > + Novo lote**: arraste os ZIPs do WhatsApp, um por carro.
+- **Abas**: **Posts** (com as sub-abas **Anúncios e vendidos** e **Comunicados**) e **Templates** (cadastro das lojas e das artes).
+- **Posts > Anúncios e vendidos > + Novo lote**: arraste os ZIPs do WhatsApp, um por carro.
   - Confira a loja e o tipo de cada carro. A mensagem já vem do `_chat.txt` quando o ZIP tem o arquivo.
   - Escolha as fotos: a esteira já marca a capa e mais 8 fotos. Clique para marcar ou desmarcar e use "capa" para trocar a foto da arte. Só as marcadas são enviadas. A CTA entra sozinha no fim do carrossel.
   - Clique em **Criar lote**. As fotos sobem comprimidas e a IA lê as mensagens.
@@ -69,9 +70,9 @@ Use o mesmo projeto do Google Cloud da Agenda.
   - Só uma pessoa edita cada carro por vez. Os outros veem quem está editando.
   - Na barra de baixo: **Revisado ✓ e próximo** marca e já abre o próximo da lista; **← Anterior** e **Próximo →** só navegam.
   - A foto da capa já abre enquadrada: o veículo inteiro, com folga dos lados.
-  - Marque vários posts (ou todos) para **mudar o status**, **Baixar (.zip)** ou **Salvar no Drive** de uma vez.
-- **Comunicados**: escreva o assunto, busque e marque as lojas e revise em Posts.
-- **Lojas**: busque a loja e clique para abrir a janela com o Drive, os contatos, o modelo de legenda e as artes.
+  - Marque vários posts (ou todos) para **mudar o status**, **Baixar (.zip)**, **Salvar no Drive** ou **Concluir ✓** de uma vez.
+- **Posts > Comunicados > + Novo comunicado**: escreva o assunto, busque e marque as lojas. Os comunicados ficam numa lista só deles.
+- **Templates**: busque a loja e clique para abrir a janela com o Drive, os contatos, o modelo de legenda e as artes.
 - **Cliente novo (+ Template)**: escolha o cliente e a arte e suba três coisas: o PNG do Canva sem os textos e sem a foto (fundo transparente), o print da arte pronta e as fontes. Depois abre o **Ajustar textos**:
   - O print aparece por cima. Arraste cada texto até coincidir.
   - Use **+ Texto** para incluir marca e modelo, ano, KM, valor etc. e escolha fonte, peso, cor e alinhamento.
