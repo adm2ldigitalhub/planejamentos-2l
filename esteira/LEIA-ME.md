@@ -63,11 +63,13 @@ Use o mesmo projeto do Google Cloud da Agenda.
   - Confira a loja e o tipo de cada carro. A mensagem já vem do `_chat.txt` quando o ZIP tem o arquivo.
   - Escolha as fotos: a esteira já marca a capa e mais 8 fotos. Clique para marcar ou desmarcar e use "capa" para trocar a foto da arte. Só as marcadas são enviadas. A CTA entra sozinha no fim do carrossel.
   - Clique em **Criar lote**. As fotos sobem comprimidas e a IA lê as mensagens.
-- **Posts**: clique no carro para revisar.
+- **Posts**: clique no carro para revisar. Os status são Novo, Revisado, Salvo no Drive e Concluído. Os concluídos ficam escondidos (escolha "Todos, com concluídos" para ver). Clique no nome da coluna para ordenar.
   - Arraste e dê zoom na foto, troque a capa, confira os textos e a legenda. Tudo é salvo sozinho.
   - Em "Dados" aparecem só os campos que a arte da loja usa. Os outros ficam em "Outros dados" e só ajudam a legenda.
   - Só uma pessoa edita cada carro por vez. Os outros veem quem está editando.
-  - Marque vários posts (ou todos) para **Baixar (.zip)**, **Salvar no Drive** ou **Marcar como revisado** de uma vez.
+  - Na barra de baixo: **Revisado ✓ e próximo** marca e já abre o próximo da lista; **← Anterior** e **Próximo →** só navegam.
+  - A foto da capa já abre enquadrada: o veículo inteiro, com folga dos lados.
+  - Marque vários posts (ou todos) para **mudar o status**, **Baixar (.zip)** ou **Salvar no Drive** de uma vez.
 - **Comunicados**: escreva o assunto, busque e marque as lojas e revise em Posts.
 - **Lojas**: busque a loja e clique para abrir a janela com o Drive, os contatos, o modelo de legenda e as artes.
 - **Cliente novo (+ Template)**: escolha o cliente e a arte e suba três coisas: o PNG do Canva sem os textos e sem a foto (fundo transparente), o print da arte pronta e as fontes. Depois abre o **Ajustar textos**:

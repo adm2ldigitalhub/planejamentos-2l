@@ -12,7 +12,10 @@ const ok = ({ data, error }) => { if (error) throw error; return data; };
 const S = { email: null, admin: false, lojas: [], tpls: [], cfg: {}, clients: [], fontsReady: false };
 const MESES = ["JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO", "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO"];
 const TIPOS = { anuncio: "Anúncio", vendido: "Vendido", comunicado: "Comunicado", imovel: "Imóvel" };
-const STATUS = { novo: "Novo", pronto: "Pronto p/ revisar", revisado: "Revisado", salvo: "Salvo no Drive", erro: "Erro" };
+const STATUS = { novo: "Novo", revisado: "Revisado", salvo: "Salvo no Drive", concluido: "Concluído" };
+// status antigos ("pronto", "erro") contam como novo; a ordem serve para ordenar a lista
+const stDe = s => STATUS[s] ? s : "novo";
+const ST_ORDEM = { novo: 0, revisado: 1, salvo: 2, concluido: 3 };
 const CAMPOS_CARRO = [["marca", "Marca"], ["modelo", "Modelo"], ["versao", "Versão"], ["ano", "Ano"], ["km", "KM"], ["valor", "Valor (R$)"],
   ["cambio", "Câmbio"], ["motor", "Motor"], ["combustivel", "Combustível"], ["detalhes", "Detalhe curto (capa)"]];
 const CAMPOS_IMOVEL = [["tipo_imovel", "Tipo (CASA, APTO…)"], ["negocio", "Negócio (Venda/Locação)"], ["valor", "Valor (R$)"], ["bairro", "Bairro"], ["cidade", "Cidade"],
@@ -213,7 +216,10 @@ async function capaDoPost(P, tpl, imgs) {
   const camada = await storageImg(tpl.camada_path);
   const ft = fundoDe(tpl), fundo = ft ? await storageImg(ft.camada_path) : null;
   const img = imgs[P.capa || 0];
-  return R.renderArte({ tpl, camada, fundo, foto: img && P.tipo !== "comunicado" ? { img, pos: P.foto_pos || R.fotoPadrao(tpl, img) } : null, textos: textosDoPost(tpl, P) });
+  // post que ninguém abriu ainda: enquadra o veículo antes de montar
+  let pos = P.foto_pos;
+  if (!pos && img && (P.tipo === "anuncio" || P.tipo === "vendido")) pos = await enquadrarCarro(tpl, img).catch(() => null);
+  return R.renderArte({ tpl, camada, fundo, foto: img && P.tipo !== "comunicado" ? { img, pos: pos || R.fotoPadrao(tpl, img) } : null, textos: textosDoPost(tpl, P) });
 }
 async function arquivosDoPost(P) {
   await fontsReady();
@@ -265,38 +271,58 @@ async function salvarNoDrive(P, fs, onProg) {
 }
 
 // ---------------- POSTS (fila) ----------------
+// ordem e filtro da lista ficam guardados nesta aba do navegador; o editor usa a mesma sequência no "próximo"
+const memo = (k, v) => { try { if (v === undefined) return JSON.parse(sessionStorage.getItem("esteira-" + k)); sessionStorage.setItem("esteira-" + k, JSON.stringify(v)); } catch (e) { return null; } };
+const ORDENS = {
+  loja: p => norm(lojaLabel(p.loja)),
+  post: p => norm((TIPOS[p.tipo] || "") + " " + tituloPost(p)),
+  status: p => ST_ORDEM[stDe(p.status)],
+  atualizado: p => p.updated_at || p.created_at,
+};
+function ordenarPosts(lista, ord) {
+  const f = ORDENS[ord.k] || ORDENS.atualizado;
+  return [...lista].sort((a, b) => { const x = f(a), y = f(b); return (x < y ? -1 : x > y ? 1 : 0) * ord.dir || (b.created_at > a.created_at ? 1 : -1); });
+}
 async function viewFila(filtroLote) {
   const m = $("#main");
+  const ord = memo("ordem") || { k: "atualizado", dir: -1 };
   m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Posts</h1><a class="btn primary" href="#novo">+ Novo lote</a></div>
-    <p class="sub">Carros, vendidos e comunicados em andamento. Clique no post para revisar, ou marque vários para baixar de uma vez.</p>
+    <p class="sub">Clique no post para revisar; dentro dele dá para ir para o próximo. Ou marque vários para mudar o status, baixar ou salvar no Drive de uma vez.</p>
     <div class="row" style="margin-bottom:12px">
-      <select id="fs" style="max-width:200px"><option value="">Todos os status</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
+      <select id="fs" style="max-width:220px"><option value="">Em andamento (sem concluídos)</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}">Só ${v.toLowerCase()}</option>`).join("")}<option value="*">Todos, com concluídos</option></select>
       <select id="fl" style="max-width:240px"><option value="">Todas as lojas</option>${[...S.lojas].sort((a, b) => lojaLabel(a.nome).localeCompare(lojaLabel(b.nome), "pt-BR")).map(l => `<option value="${esc(l.nome)}">${esc(lojaLabel(l.nome))}</option>`).join("")}</select>
       <input id="fq" placeholder="Buscar carro ou loja…" class="search">
       ${filtroLote ? `<span class="pill">só este lote <a href="#fila">×</a></span>` : ""}
     </div><div id="lista"><p class="muted">Carregando…</p></div><div id="selbar"></div>`;
+  const f0 = memo("filtro") || {};
+  $("#fs").value = f0.fs || ""; $("#fl").value = f0.fl || ""; $("#fq").value = f0.fq || "";
   let posts = [], vis = [];
   const marcados = new Set();
   async function carregar() {
-    let q = sb.from("esteira_posts").select("*").order("created_at", { ascending: false }).limit(300);
+    let q = sb.from("esteira_posts").select("*").order("created_at", { ascending: false }).limit(400);
     if (filtroLote) q = q.eq("lote_id", filtroLote);
     posts = ok(await q);
     for (const id of [...marcados]) if (!posts.some(p => p.id === id)) marcados.delete(id);
     desenhar();
   }
+  async function mudarStatus(st, ids) {
+    ok(await sb.from("esteira_posts").update({ status: st }).in("id", ids));
+    posts.forEach(p => { if (ids.includes(p.id)) p.status = st; });
+    if (st === "concluido") ids.forEach(id => marcados.delete(id));
+    toast(`${ids.length} post(s): ${STATUS[st]}.`); desenhar();
+  }
   function barra() {
     const n = marcados.size;
     $("#selbar").innerHTML = n ? `<div class="selbar"><b>${n} selecionado(s)</b><span class="grow"></span>
-      <button class="btn small ghost" id="sLimpa">Limpar</button><button class="btn small" id="sRev">Marcar como revisado</button>
+      <button class="btn small ghost" id="sLimpa">Limpar</button>
+      <select id="sSt" style="width:auto"><option value="">Mudar status para…</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
       <button class="btn small" id="sZip">Baixar (.zip)</button><button class="btn small primary" id="sDrv">Salvar no Drive</button>
       <span class="small muted" id="sProg" style="width:100%"></span></div>` : "";
     if (!n) return;
     $("#sLimpa").onclick = () => { marcados.clear(); desenhar(); };
-    const sel = () => posts.filter(p => marcados.has(p.id));
+    const sel = () => vis.filter(p => marcados.has(p.id)).concat(posts.filter(p => marcados.has(p.id) && !vis.includes(p)));
     const prog = t => { $("#sProg").textContent = t; };
-    $("#sRev").onclick = async () => {
-      try { ok(await sb.from("esteira_posts").update({ status: "revisado" }).in("id", [...marcados])); toast("Marcados como revisados."); await carregar(); } catch (e) { erro(e); }
-    };
+    $("#sSt").onchange = async e => { const st = e.target.value; if (!st) return; try { await mudarStatus(st, [...marcados]); } catch (err) { erro(err); } };
     $("#sZip").onclick = async () => {
       const b = $("#sZip"); b.disabled = true;
       try {
@@ -304,7 +330,7 @@ async function viewFila(filtroLote) {
         for (const P of sel()) {
           prog(`Montando ${++i} de ${marcados.size}: ${tituloPost(P)}…`);
           try {
-            let pasta = tituloPost(P); while (usados.has(pasta)) pasta += " (2)"; usados.add(pasta);
+            let pasta = `${lojaLabel(P.loja)}/${tituloPost(P)}`; while (usados.has(pasta)) pasta += " (2)"; usados.add(pasta);
             for (const f of await arquivosDoPost(P)) z.file(`${pasta}/${f.nome}`, f.blob);
           } catch (e) { falhas++; console.error(e); }
         }
@@ -315,31 +341,45 @@ async function viewFila(filtroLote) {
       b.disabled = false;
     };
     $("#sDrv").onclick = async () => {
-      const b = $("#sDrv"); b.disabled = true; let i = 0, ok_ = 0;
+      const b = $("#sDrv"); b.disabled = true; let i = 0, feitos = 0;
       for (const P of sel()) {
         prog(`Salvando ${++i} de ${marcados.size}: ${tituloPost(P)}…`);
-        try { await salvarNoDrive(P, await arquivosDoPost(P)); ok_++; } catch (e) { toast(`${tituloPost(P)}: ${e.message}`, 6000); if (/não foi configurad/.test(e.message)) break; }
+        try { await salvarNoDrive(P, await arquivosDoPost(P)); feitos++; } catch (e) { toast(`${tituloPost(P)}: ${e.message}`, 6000); if (/não foi configurad/.test(e.message)) break; }
       }
-      prog(`${ok_} de ${marcados.size} salvo(s) no Drive.`); b.disabled = false; await carregar();
+      prog(`${feitos} de ${marcados.size} salvo(s) no Drive.`); b.disabled = false; await carregar();
     };
   }
+  const seta = k => ord.k === k ? (ord.dir > 0 ? " ▲" : " ▼") : " ↕";
   function desenhar() {
     const fs = $("#fs").value, fl = $("#fl").value, fq = norm($("#fq").value);
-    vis = posts.filter(p => (!fs || p.status === fs) && (!fl || p.loja === fl) && (!fq || norm(tituloPost(p) + " " + lojaLabel(p.loja)).includes(fq)));
-    if (!vis.length) { $("#lista").innerHTML = `<div class="empty"><strong>Nada por aqui</strong>Clique em <b>+ Novo lote</b> e arraste os ZIPs do WhatsApp.</div>`; barra(); return; }
+    memo("filtro", { fs, fl, fq: $("#fq").value });
+    vis = ordenarPosts(posts.filter(p => (fs === "*" || (fs ? stDe(p.status) === fs : stDe(p.status) !== "concluido")) && (!fl || p.loja === fl)
+      && (!fq || norm(tituloPost(p) + " " + lojaLabel(p.loja)).includes(fq))), ord);
+    const ocultos = fs === "" ? posts.filter(p => stDe(p.status) === "concluido").length : 0;
+    if (!vis.length) {
+      $("#lista").innerHTML = `<div class="empty"><strong>Nada por aqui</strong>${ocultos ? `${ocultos} concluído(s) escondido(s) (<a href="#" id="verConc">mostrar</a>). ` : ""}Clique em <b>+ Novo lote</b> e arraste os ZIPs do WhatsApp.</div>`;
+      $("#verConc") && ($("#verConc").onclick = e => { e.preventDefault(); $("#fs").value = "*"; desenhar(); });
+      barra(); return;
+    }
     const agora = Date.now(), todos = vis.every(p => marcados.has(p.id));
-    $("#lista").innerHTML = `<table class="list"><thead><tr><th class="ck"><input type="checkbox" id="ckAll" ${todos ? "checked" : ""} title="Selecionar todos"></th><th></th><th>Loja</th><th>Post</th><th>Status</th><th>Atualizado</th></tr></thead><tbody>${vis.map(p => {
-      const lock = p.editando_por && p.editando_por !== S.email && agora - new Date(p.editando_em) < 180000;
+    const th = (k, l) => `<th><button class="ord" data-ord="${k}" title="Ordenar">${l}<span>${seta(k)}</span></button></th>`;
+    $("#lista").innerHTML = `<table class="list"><thead><tr><th class="ck"><input type="checkbox" id="ckAll" ${todos ? "checked" : ""} title="Selecionar todos"></th><th></th>${th("loja", "Loja")}${th("post", "Post")}${th("status", "Status")}${th("atualizado", "Atualizado")}</tr></thead><tbody>${vis.map(p => {
+      const lock = p.editando_por && p.editando_por !== S.email && agora - new Date(p.editando_em) < 180000, st = stDe(p.status);
       const titulo = p.tipo === "comunicado" ? (p.dados?.comunicado || "").slice(0, 60) : nomeCarro({ ...p.dados, tipo: p.tipo });
       return `<tr class="click" data-id="${p.id}"><td class="ck"><input type="checkbox" data-ck="${p.id}" ${marcados.has(p.id) ? "checked" : ""}></td>
         <td><img class="thumb" data-path="${esc(p.fotos?.[p.capa || 0]?.path || "")}" alt=""></td>
         <td>${esc(lojaLabel(p.loja))}</td><td><b>${esc(titulo)}</b><div class="small muted">${TIPOS[p.tipo] || p.tipo}${p.erro ? " · " + esc(p.erro) : ""}</div></td>
-        <td><span class="pill ${p.status}">${STATUS[p.status] || p.status}</span>${lock ? ` <span class="pill lock">✎ ${esc(p.editando_por.split("@")[0])}</span>` : ""}</td>
+        <td><span class="pill ${st}">${STATUS[st]}</span>${lock ? ` <span class="pill lock">✎ ${esc(p.editando_por.split("@")[0])}</span>` : ""}</td>
         <td class="small muted">${fmtData(p.updated_at)}${p.atualizado_por ? "<br>" + esc(p.atualizado_por.split("@")[0]) : ""}</td></tr>`;
-    }).join("")}</tbody></table>`;
-    $$("#lista tr.click").forEach(tr => tr.onclick = e => { if (e.target.closest(".ck")) return; location.hash = "post/" + tr.dataset.id; });
+    }).join("")}</tbody></table>${ocultos ? `<p class="small muted" style="margin-top:8px">${ocultos} concluído(s) escondido(s). <a href="#" id="verConc">Mostrar</a></p>` : ""}`;
+    $$("#lista tr.click").forEach(tr => tr.onclick = e => {
+      if (e.target.closest(".ck")) return;
+      memo("seq", vis.map(p => p.id)); location.hash = "post/" + tr.dataset.id;
+    });
     $$("#lista [data-ck]").forEach(c => c.onchange = () => { c.checked ? marcados.add(c.dataset.ck) : marcados.delete(c.dataset.ck); $("#ckAll").checked = vis.every(p => marcados.has(p.id)); barra(); });
     $("#ckAll").onchange = e => { vis.forEach(p => e.target.checked ? marcados.add(p.id) : marcados.delete(p.id)); desenhar(); };
+    $$("#lista [data-ord]").forEach(b => b.onclick = () => { const k = b.dataset.ord; if (ord.k === k) ord.dir *= -1; else { ord.k = k; ord.dir = k === "atualizado" ? -1 : 1; } memo("ordem", ord); desenhar(); });
+    $("#verConc") && ($("#verConc").onclick = e => { e.preventDefault(); $("#fs").value = "*"; desenhar(); });
     $$("#lista img[data-path]").forEach(async img => { if (img.dataset.path) try { img.src = await fileUrl(img.dataset.path); } catch (e) {} });
     barra();
   }
@@ -483,7 +523,7 @@ async function processarPostIA(p) {
   const r = await fn("esteira-ia", { acao: p.tipo === "vendido" ? "vendido" : p.tipo === "imovel" ? "imovel" : "anuncio",
     mensagem: p.mensagem, loja: { nome: lojaLabel(p.loja), legenda_modelo: loja.legenda_modelo || "", dados: loja.dados || {} } });
   const dados = { ...p.dados, ...(r.dados || {}), tipo: p.tipo };
-  const upd = { dados, legenda: r.legenda || p.legenda || "", status: "pronto", erro: null };
+  const upd = { dados, legenda: r.legenda || p.legenda || "", erro: null };
   ok(await sb.from("esteira_posts").update(upd).eq("id", p.id));
   return upd;
 }
@@ -509,17 +549,25 @@ async function viewPost(id) {
   let tpl = tplDo(P.loja, P.tipo, P.variacao);
   if (P.ordem == null) P.ordem = (P.fotos || []).map((_, i) => i).filter(i => i !== (P.capa || 0));
   const vars = variacoes(P.loja, P.tipo);
+  // anterior / próximo: a mesma ordem da lista de Posts (ou os em andamento, se abriu direto pelo link)
+  let seq = memo("seq") || [];
+  if (!seq.includes(id)) {
+    const ps = ok(await sb.from("esteira_posts").select("id,status,loja,tipo,dados,created_at,updated_at").order("created_at", { ascending: false }).limit(400));
+    seq = ordenarPosts(ps.filter(p => stDe(p.status) !== "concluido" || p.id === id), memo("ordem") || { k: "atualizado", dir: -1 }).map(p => p.id);
+    memo("seq", seq);
+  }
+  const pos = Math.max(0, seq.indexOf(id)), ant = seq[pos - 1], prox = seq[pos + 1];
 
   m.innerHTML = `<a href="#fila" class="muted small">← Posts</a>
     <div id="lockbar"></div>
     <div class="row" style="margin:6px 0 16px"><div class="grow"><h1 style="margin:0">${esc(lojaLabel(P.loja))}</h1><span class="muted small">${TIPOS[P.tipo]} · criado por ${esc((P.criado_por || "").split("@")[0])} ${fmtData(P.created_at)}</span></div>
-      <select id="st" style="max-width:190px">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${P.status === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+      <select id="st" style="max-width:190px">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${stDe(P.status) === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
     ${!tpl ? `<div class="lockbar">Esta loja não tem template liberado para ${TIPOS[P.tipo]}.</div>` : ""}
     <div class="editor">
       <div class="stage">
         <canvas id="cv"></canvas>
         ${comunicado ? "" : `<div class="row small" style="margin-top:8px"><span class="muted">Zoom</span><input type="range" id="zoom" min="0.3" max="3" step="0.01" class="grow">
-          <button class="btn small ghost" id="enq" title="Detecta o carro e enquadra">Enquadrar carro</button><button class="btn small ghost" id="cent">Centralizar</button></div>
+          ${imovel ? "" : `<button class="btn small ghost" id="enq" title="Acha o veículo na foto e enquadra inteiro, com folga dos lados">Enquadrar veículo</button>`}<button class="btn small ghost" id="cent">Centralizar</button></div>
           <div class="small muted">Arraste a foto para posicionar. Clique numa miniatura para trocar a foto da capa; o “×” tira a foto do carrossel; arraste para reordenar.</div>
           <div class="strip" id="strip"></div>`}
       </div>
@@ -527,10 +575,10 @@ async function viewPost(id) {
         ${vars.length > 1 ? `<div class="card" style="margin-bottom:12px"><label class="f">Variação do template</label><select id="var">${vars.map(v => `<option ${v === (P.variacao || "padrao") ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>` : ""}
         <div class="card" style="margin-bottom:12px">
           <div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">${comunicado ? "Texto do comunicado" : "Dados"}</h2>
-            ${comunicado ? "" : `<button class="btn small ghost" id="ia">Ler mensagem com IA</button>`}</div>
+            </div>
           ${comunicado ? `<textarea id="com" rows="7">${esc(P.dados?.comunicado || "")}</textarea>` :
           `<details ${P.mensagem ? "" : "open"}><summary>Mensagem do lojista</summary><textarea id="msg" rows="4">${esc(P.mensagem || "")}</textarea>
-             <button class="btn small ghost" id="reler" style="margin-top:6px">Ler de novo (sem IA)</button></details>
+             <div class="row" style="margin-top:6px"><button class="btn small ghost" id="reler">Ler a mensagem de novo</button><span class="small muted">Use se corrigir a mensagem: preenche os dados de novo.</span></div></details>
            <div id="campos">${(() => {
              const inp = ([k, l]) => `<div><label class="f">${l}</label><input data-c="${k}" value="${esc(P.dados?.[k] ?? "")}"></div>`;
              const usados = camposDaArte(tpl), naArte = tpl ? campos.filter(([k]) => usados.has(k)) : campos, outros = campos.filter(c => !naArte.includes(c));
@@ -540,14 +588,19 @@ async function viewPost(id) {
         <div class="card" style="margin-bottom:12px"><h2>Textos da capa</h2><p class="small muted" style="margin-top:-6px">Saem dos dados. Se mudar algum aqui, ele fica fixo (↺ volta ao automático).</p><div id="boxes"></div></div>
         ${comunicado ? "" : `<div class="card" style="margin-bottom:12px"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Legenda</h2>
           <button class="btn small ghost" id="leg">Gerar com IA</button></div><textarea id="legenda" rows="12">${esc(P.legenda || "")}</textarea></div>`}
-        <div class="card"><div class="row">
-          <button class="btn" id="bcapa">Baixar só a capa</button>
-          ${comunicado || P.tipo === "vendido" ? "" : `<button class="btn" id="bzip">Baixar carrossel (.zip)</button>`}
-          <button class="btn primary" id="bdrive">Salvar no Drive</button>
-          <span class="small muted grow" id="savest"></span></div>
-          ${P.drive_url ? `<p class="small" style="margin:8px 0 0"><a href="${esc(P.drive_url)}" target="_blank" rel="noopener">Abrir pasta no Drive ↗</a></p>` : ""}
-          <div id="drvprog" class="hidden"><div class="prog"><i></i></div></div></div>
       </div>
+    </div>
+    <div class="navbar">
+      <button class="btn small ghost" id="nAnt" ${ant ? "" : "disabled"} title="Post anterior da lista">← Anterior</button>
+      <span class="pos">${pos + 1} de ${seq.length}</span>
+      <button class="btn small" id="bcapa">Baixar só a capa</button>
+      ${comunicado || P.tipo === "vendido" ? "" : `<button class="btn small" id="bzip">Baixar carrossel (.zip)</button>`}
+      <button class="btn small" id="bdrive">Salvar no Drive</button>
+      ${P.drive_url ? `<a class="small" href="${esc(P.drive_url)}" target="_blank" rel="noopener">Pasta no Drive ↗</a>` : ""}
+      <span class="small muted grow" id="savest"></span>
+      <button class="btn small primary" id="nRev">${prox ? "Revisado ✓ e próximo →" : "Revisado ✓ e voltar à lista"}</button>
+      <button class="btn small ghost" id="nProx" ${prox ? "" : "disabled"} title="Próximo post sem mudar o status">Próximo →</button>
+      <div id="drvprog" class="hidden" style="width:100%"><div class="prog"><i></i></div></div>
     </div>`;
   E.canvas = $("#cv");
 
@@ -657,13 +710,13 @@ async function viewPost(id) {
       zoomPara(base * +e.target.value, a.left + a.width / 2, a.top + a.height / 2);
     };
     $("#cent").onclick = () => { const img = fotoImgs[P.capa || 0]; if (img) { P.foto_pos = R.fotoPadrao(tpl, img); desenhar(); mudou(); } };
-    $("#enq").onclick = async () => {
+    $("#enq") && ($("#enq").onclick = async () => {
       const img = fotoImgs[P.capa || 0]; if (!img) return;
-      $("#enq").disabled = true; $("#enq").textContent = "Procurando o carro…";
-      try { const pos = await enquadrarCarro(tpl, img); if (pos) { P.foto_pos = pos; desenhar(); mudou(); } else toast("Não achei o carro na foto. Ajuste à mão."); }
+      $("#enq").disabled = true; $("#enq").textContent = "Procurando o veículo…";
+      try { const pos = await enquadrarCarro(tpl, img); if (pos) { P.foto_pos = pos; desenhar(); mudou(); } else toast("Não achei o veículo na foto. Ajuste à mão."); }
       catch (e) { erro(e); }
-      $("#enq").disabled = false; $("#enq").textContent = "Enquadrar carro";
-    };
+      $("#enq").disabled = false; $("#enq").textContent = "Enquadrar veículo";
+    });
   }
 
   // salvar (automático)
@@ -691,25 +744,24 @@ async function viewPost(id) {
   $("#legenda") && ($("#legenda").oninput = e => { P.legenda = e.target.value; mudou(); });
   $("#st").onchange = e => { P.status = e.target.value; mudou(); };
   $("#var") && ($("#var").onchange = e => { P.variacao = e.target.value; tpl = tplDo(P.loja, P.tipo, P.variacao); P.foto_pos = null; desenharBoxes(); desenhar(); mudou(); });
-  $("#reler") && ($("#reler").onclick = () => {
-    const d = parseMensagem(P.mensagem); P.dados = { ...(P.dados || {}), ...Object.fromEntries(Object.entries(d).filter(([, v]) => v)) };
-    $$("#campos [data-c]").forEach(el => el.value = P.dados[el.dataset.c] ?? ""); desenharBoxes(); desenhar(); mudou();
+  // ler a mensagem de novo: com IA quando estiver ligada; sem ela, a leitura simples
+  $("#reler") && ($("#reler").onclick = async () => {
+    const b = $("#reler"), txt = b.textContent; b.disabled = true; b.textContent = "Lendo…";
+    try { await salvar(); const upd = await processarPostIA({ ...P }); P.dados = upd.dados; P.legenda = P.legenda || upd.legenda; }
+    catch (e) {
+      if (!/não foi configurad/.test(e.message)) toast("IA: " + e.message, 5000);
+      const d = parseMensagem(P.mensagem); P.dados = { ...(P.dados || {}), ...Object.fromEntries(Object.entries(d).filter(([, v]) => v)) };
+    }
+    $$("#campos [data-c]").forEach(el => el.value = P.dados[el.dataset.c] ?? "");
+    if ($("#legenda")) $("#legenda").value = P.legenda || "";
+    desenharBoxes(); desenhar(); mudou(); b.disabled = false; b.textContent = txt;
   });
-  async function rodarIA(soLegenda) {
-    const btn = soLegenda ? $("#leg") : $("#ia"); const txt = btn.textContent; btn.disabled = true; btn.textContent = "Pensando…";
-    try {
-      await salvar();
-      const upd = await processarPostIA({ ...P });
-      if (soLegenda) { P.legenda = upd.legenda; } else { P.dados = upd.dados; P.legenda = P.legenda || upd.legenda; }
-      P.status = P.status === "novo" ? "pronto" : P.status;
-      $$("#campos [data-c]").forEach(el => el.value = P.dados[el.dataset.c] ?? "");
-      if ($("#legenda")) $("#legenda").value = P.legenda || ""; $("#st").value = P.status;
-      desenharBoxes(); desenhar(); mudou();
-    } catch (e) { erro(e); }
+  $("#leg") && ($("#leg").onclick = async () => {
+    const btn = $("#leg"), txt = btn.textContent; btn.disabled = true; btn.textContent = "Escrevendo…";
+    try { await salvar(); const upd = await processarPostIA({ ...P }); P.legenda = upd.legenda; $("#legenda").value = P.legenda || ""; mudou(); }
+    catch (e) { erro(e); }
     btn.disabled = false; btn.textContent = txt;
-  }
-  $("#ia") && ($("#ia").onclick = () => rodarIA(false));
-  $("#leg") && ($("#leg").onclick = () => rodarIA(true));
+  });
 
   // saídas
   async function capaCanvas() { await desenhar(); const c = document.createElement("canvas"); c.width = E.canvas.width; c.height = E.canvas.height; c.getContext("2d").drawImage(E.canvas, 0, 0); return c; }
@@ -729,7 +781,22 @@ async function viewPost(id) {
     b.disabled = false; bar.classList.add("hidden");
   };
 
+  // navegação entre posts
+  const ir = pid => { flush(); location.hash = "post/" + pid; };
+  $("#nAnt").onclick = () => ant && ir(ant);
+  $("#nProx").onclick = () => prox && ir(prox);
+  $("#nRev").onclick = async () => {
+    if (E.travado) return toast("Outra pessoa está editando este post.");
+    P.status = "revisado"; $("#st").value = "revisado"; await salvar();
+    if (prox) ir(prox); else { toast("Esse era o último da lista."); location.hash = "fila"; }
+  };
+
   lockUI(); desenharStrip(); desenharBoxes(); await desenhar();
+  // primeira vez que abre: enquadra o veículo sozinho
+  if (!P.foto_pos && !E.travado && (P.tipo === "anuncio" || P.tipo === "vendido") && fotoImgs[P.capa || 0] && tpl) {
+    const pos = await enquadrarCarro(tpl, fotoImgs[P.capa || 0]).catch(() => null);
+    if (pos && !P.foto_pos) { P.foto_pos = pos; desenhar(); mudou(); }
+  }
 }
 
 // detecção do carro (modelo gratuito que roda no navegador)
@@ -746,9 +813,11 @@ async function enquadrarCarro(tpl, img) {
   if (!preds.length) return null;
   const [bx, by, bw, bh] = preds.sort((a, b) => b.bbox[2] * b.bbox[3] - a.bbox[2] * a.bbox[3])[0].bbox;
   const a = R.areaFoto(tpl);
+  // a foto sempre cobre a área toda; dentro disso, o veículo inteiro ocupa no máximo 86% da largura
+  // (7% de folga de cada lado) e 80% da altura, para nunca sair cortado
   const cover = Math.max(a.width / img.width, a.height / img.height);
-  const s = Math.max(cover, Math.min(a.width * 0.92 / bw, a.height * 0.75 / bh));
-  let x = a.left + a.width / 2 - (bx + bw / 2) * s, y = a.top + a.height * 0.56 - (by + bh / 2) * s;
+  const s = Math.max(cover, Math.min(a.width * 0.86 / bw, a.height * 0.8 / bh));
+  let x = a.left + a.width / 2 - (bx + bw / 2) * s, y = a.top + a.height * 0.55 - (by + bh / 2) * s;
   x = Math.min(a.left, Math.max(a.left + a.width - img.width * s, x));
   y = Math.min(a.top, Math.max(a.top + a.height - img.height * s, y));
   return { x, y, s };
@@ -784,7 +853,7 @@ async function viewComunicado() {
         } catch (e) { toast(e.message + " Usei o mesmo texto para todas.", 6000); }
       }
       const lote = ok(await sb.from("esteira_lotes").insert({ nome: "Comunicado: " + assunto.slice(0, 40) }).select().single());
-      ok(await sb.from("esteira_posts").insert(sel.map(n => ({ lote_id: lote.id, loja: n, tipo: "comunicado", status: "pronto", mensagem: assunto, dados: { comunicado: textos[n] || assunto } }))));
+      ok(await sb.from("esteira_posts").insert(sel.map(n => ({ lote_id: lote.id, loja: n, tipo: "comunicado", status: "novo", mensagem: assunto, dados: { comunicado: textos[n] || assunto } }))));
       toast("Comunicados criados!"); location.hash = "fila/" + lote.id;
     } catch (e) { erro(e); $("#gerar").disabled = false; }
   };
