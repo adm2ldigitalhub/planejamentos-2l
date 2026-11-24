@@ -18,8 +18,8 @@ bucket privado `esteira`. Ele não mexe nas tabelas do planejamento.
    python build/montar_templates.py
    python build/montar_fontes.py
    ```
-2. Abra a esteira, vá em **Lojas e templates > Importar templates** e escolha a pasta **esteira-2l**.
-3. Clique em **Vincular clientes pelo nome** e confira as lojas que ficaram sem cliente.
+2. Abra a esteira, vá em **Lojas > Importar pacote de templates do computador** e escolha a pasta **esteira-2l**.
+3. Clique em **Ligar pelo nome** e abra as lojas que ficaram "sem cliente" para escolher à mão.
 4. Abra cada loja e preencha os campos abaixo:
    - **ID da pasta do Drive**: o código no fim do link da pasta da loja.
    - **Subpastas**: por exemplo `04.CARROS/{MES_NUM}.{MES_NOME}/CARROS/{CARRO}`.
@@ -59,15 +59,19 @@ Use o mesmo projeto do Google Cloud da Agenda.
 6. Crie os segredos `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` e `GOOGLE_REFRESH_TOKEN`.
 
 ## Como usar
-- **Novo lote**: arraste os ZIPs do WhatsApp.
-  - Para cada carro, confira a loja e o tipo. A mensagem já vem do `_chat.txt` quando o ZIP tem o arquivo.
-  - Depois clique em **Criar lote**. As fotos sobem comprimidas e a IA lê as mensagens.
-- **Fila**: clique no carro para revisar.
-  - Arraste e dê zoom na foto, troque a foto da capa e confira os textos e a legenda.
-  - Tudo é salvo sozinho.
+- **Posts > + Novo lote**: arraste os ZIPs do WhatsApp, um por carro.
+  - Confira a loja e o tipo de cada carro. A mensagem já vem do `_chat.txt` quando o ZIP tem o arquivo.
+  - Escolha as fotos: a esteira já marca a capa e mais 8 fotos. Clique para marcar ou desmarcar e use "capa" para trocar a foto da arte. Só as marcadas são enviadas. A CTA entra sozinha no fim do carrossel.
+  - Clique em **Criar lote**. As fotos sobem comprimidas e a IA lê as mensagens.
+- **Posts**: clique no carro para revisar.
+  - Arraste e dê zoom na foto, troque a capa, confira os textos e a legenda. Tudo é salvo sozinho.
+  - Em "Dados" aparecem só os campos que a arte da loja usa. Os outros ficam em "Outros dados" e só ajudam a legenda.
   - Só uma pessoa edita cada carro por vez. Os outros veem quem está editando.
-- **Saídas**: Baixar só a capa, Baixar carrossel (.zip) ou Salvar no Drive. O botão do Drive cria a pasta do mês e a do carro.
-- **Comunicados**: escreva o assunto, marque as lojas e revise na fila.
-- **Ajustar** (Lojas > abrir loja > Ajustar):
-  - Coloque por cima a arte do Canva baixada em PNG.
-  - Mova cada texto com as setas até coincidir e salve.
+  - Marque vários posts (ou todos) para **Baixar (.zip)**, **Salvar no Drive** ou **Marcar como revisado** de uma vez.
+- **Comunicados**: escreva o assunto, busque e marque as lojas e revise em Posts.
+- **Lojas**: busque a loja e clique para abrir a janela com o Drive, os contatos, o modelo de legenda e as artes.
+- **Cliente novo (+ Template)**: escolha o cliente e a arte e suba três coisas: o PNG do Canva sem os textos e sem a foto (fundo transparente), o print da arte pronta e as fontes. Depois abre o **Ajustar textos**:
+  - O print aparece por cima. Arraste cada texto até coincidir.
+  - Use **+ Texto** para incluir marca e modelo, ano, KM, valor etc. e escolha fonte, peso, cor e alinhamento.
+  - Em "Área da foto do carro", diga onde a foto entra.
+  - Clique em **Salvar ajustes**.

@@ -119,7 +119,7 @@ function viewLogin() {
   };
 }
 function renderTabs(v) {
-  const tabs = [["fila", "Fila"], ["novo", "Novo lote"], ["comunicado", "Comunicados"], ["lojas", "Lojas e templates"]];
+  const tabs = [["fila", "Posts"], ["comunicado", "Comunicados"], ["lojas", "Lojas"]];
   $("#tabs").innerHTML = tabs.map(([k, l]) => `<a href="#${k}" class="${v === k ? "on" : ""}">${l}</a>`).join("");
 }
 let leaveHooks = [];
@@ -127,7 +127,7 @@ function route() {
   leaveHooks.forEach(f => { try { f(); } catch (e) {} }); leaveHooks = [];
   const [v, ...rest] = (location.hash.slice(1) || "fila").split("/");
   const arg = rest.length ? decodeURIComponent(rest.join("/")) : null;
-  renderTabs(v === "post" ? "fila" : v === "ajustar" ? "lojas" : v);
+  renderTabs(v === "post" || v === "novo" ? "fila" : v === "ajustar" ? "lojas" : v);
   window.scrollTo(0, 0);
   const views = { fila: viewFila, novo: viewNovo, post: viewPost, comunicado: viewComunicado, lojas: viewLojas, ajustar: viewAjustar };
   Promise.resolve((views[v] || viewFila)(arg)).catch(erro);
@@ -192,38 +192,156 @@ async function comprimir(blob) {
   return { blob: out, w: cv.width, h: cv.height };
 }
 
-// ---------------- FILA ----------------
+// ---------------- ARQUIVOS DE UM POST (usado no editor e no "baixar vários") ----------------
+const fundoDe = t => t?.render?.fundo_camada ? S.tpls.find(x => x.loja === t.loja && x.arte === t.render.fundo_camada && x.variacao === t.variacao) || S.tpls.find(x => x.loja === t.loja && x.arte === t.render.fundo_camada) : null;
+const ctaDe = loja => S.tpls.find(t => t.loja === loja && t.tipo === "cta" && t.liberado);
+// campos de dados que aparecem na arte (o resto só ajuda a legenda)
+function camposDaArte(tpl) {
+  const s = new Set();
+  for (const cx of tpl?.caixas || []) for (const md of [cx.modelo, ...(cx.trechos || []).map(r => r.modelo)])
+    for (const [, k] of String(md || "").matchAll(/\{(\w+)\}/g)) s.add(k === "valor_cent" ? "valor" : k);
+  return s;
+}
+const tituloPost = P => P.tipo === "comunicado" ? "COMUNICADO " + lojaLabel(P.loja) : (P.tipo === "vendido" ? "VENDIDO " : "") + nomeCarro({ ...(P.dados || {}), tipo: P.tipo });
+function textosDoPost(tpl, P) {
+  const auto = R.textosPadrao(tpl, { ...(P.dados || {}), tipo: P.tipo }), out = { ...auto };
+  for (const [k, v] of Object.entries(P.textos || {})) if (v != null && k in auto) out[k] = v;
+  return out;
+}
+async function capaDoPost(P, tpl, imgs) {
+  await R.ensureFonts(tpl);
+  const camada = await storageImg(tpl.camada_path);
+  const ft = fundoDe(tpl), fundo = ft ? await storageImg(ft.camada_path) : null;
+  const img = imgs[P.capa || 0];
+  return R.renderArte({ tpl, camada, fundo, foto: img && P.tipo !== "comunicado" ? { img, pos: P.foto_pos || R.fotoPadrao(tpl, img) } : null, textos: textosDoPost(tpl, P) });
+}
+async function arquivosDoPost(P) {
+  await fontsReady();
+  const tpl = tplDo(P.loja, P.tipo, P.variacao);
+  if (!tpl) throw new Error(`${lojaLabel(P.loja)} não tem template liberado para ${TIPOS[P.tipo]}.`);
+  const imgs = await Promise.all((P.fotos || []).map(f => storageImg(f.path).catch(() => null)));
+  const out = [], pad = n => String(n).padStart(2, "0");
+  out.push({ nome: `${pad(1)} - capa.png`, blob: await canvasBlob(await capaDoPost(P, tpl, imgs)) });
+  if (P.tipo === "anuncio" || P.tipo === "imovel") {
+    let n = 2;
+    const ordem = P.ordem ?? (P.fotos || []).map((_, i) => i).filter(i => i !== (P.capa || 0));
+    for (const i of ordem) {
+      const img = imgs[i]; if (!img) continue;
+      const cv = R.renderFotoSolta(img, tpl.largura, tpl.altura, P.fotos_pos?.[i]);
+      out.push({ nome: `${pad(n++)} - foto.jpg`, blob: await canvasBlob(cv, "image/jpeg", 0.92) });
+    }
+    const cta = ctaDe(P.loja);
+    if (cta) {
+      const im = await storageImg(cta.camada_path); const cv = document.createElement("canvas"); cv.width = cta.largura; cv.height = cta.altura;
+      cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height); out.push({ nome: `${pad(n++)} - cta.png`, blob: await canvasBlob(cv) });
+    }
+    const site = tplDo(P.loja, "site");
+    if (site) {
+      const img = imgs[P.capa || 0], camada = await storageImg(site.camada_path);
+      const cv = R.renderArte({ tpl: site, camada, foto: img ? { img } : null, textos: R.textosPadrao(site, { ...(P.dados || {}), tipo: P.tipo }) });
+      out.push({ nome: `site.png`, blob: await canvasBlob(cv) });
+    }
+  }
+  if (P.legenda) out.push({ nome: "legenda.txt", blob: new Blob([P.legenda], { type: "text/plain;charset=utf-8" }) });
+  return out;
+}
+// cria a pasta do mês/carro no Drive da loja e sobe os arquivos
+async function salvarNoDrive(P, fs, onProg) {
+  const loja = lojaObj(P.loja);
+  if (!loja.drive_pasta_id) throw new Error(`Falta a pasta do Drive de ${lojaLabel(P.loja)} (aba Lojas).`);
+  const hoje = new Date();
+  const padrao = (P.tipo === "vendido" && loja.dados?.drive_padrao_vendido) || (P.tipo === "comunicado" && loja.dados?.drive_padrao_comunicado) || loja.drive_padrao || "{CARRO}";
+  const nome = P.tipo === "comunicado" ? "COMUNICADO " + hoje.toLocaleDateString("pt-BR").replace(/\//g, "-") : tituloPost(P);
+  const caminho = padrao.replace(/\{MES_NUM\}/g, String(hoje.getMonth() + 1).padStart(2, "0")).replace(/\{MES_NOME\}/g, MESES[hoje.getMonth()])
+    .replace(/\{ANO\}/g, hoje.getFullYear()).replace(/\{CARRO\}/g, nome).replace(/\{TIPO\}/g, TIPOS[P.tipo].toUpperCase());
+  const pasta = await fn("esteira-drive", { acao: "pasta", base: loja.drive_pasta_id, caminho });
+  let n = 0;
+  for (const f of fs) {
+    await fn("esteira-drive", { acao: "arquivo", pasta: pasta.id, nome: f.nome, mime: f.blob.type || "application/octet-stream", base64: await blobB64(f.blob) });
+    onProg && onProg(++n, fs.length);
+  }
+  ok(await sb.from("esteira_posts").update({ drive_url: pasta.url, status: "salvo" }).eq("id", P.id));
+  return pasta.url;
+}
+
+// ---------------- POSTS (fila) ----------------
 async function viewFila(filtroLote) {
   const m = $("#main");
-  m.innerHTML = `<h1>Fila</h1><p class="sub">Carros, vendidos e comunicados em andamento. Clique para revisar.</p>
+  m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Posts</h1><a class="btn primary" href="#novo">+ Novo lote</a></div>
+    <p class="sub">Carros, vendidos e comunicados em andamento. Clique no post para revisar, ou marque vários para baixar de uma vez.</p>
     <div class="row" style="margin-bottom:12px">
       <select id="fs" style="max-width:200px"><option value="">Todos os status</option>${Object.entries(STATUS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
-      <select id="fl" style="max-width:240px"><option value="">Todas as lojas</option>${S.lojas.map(l => `<option value="${esc(l.nome)}">${esc(lojaLabel(l.nome))}</option>`).join("")}</select>
-      <input id="fq" placeholder="Buscar carro…" style="max-width:240px">
+      <select id="fl" style="max-width:240px"><option value="">Todas as lojas</option>${[...S.lojas].sort((a, b) => lojaLabel(a.nome).localeCompare(lojaLabel(b.nome), "pt-BR")).map(l => `<option value="${esc(l.nome)}">${esc(lojaLabel(l.nome))}</option>`).join("")}</select>
+      <input id="fq" placeholder="Buscar carro ou loja…" class="search">
       ${filtroLote ? `<span class="pill">só este lote <a href="#fila">×</a></span>` : ""}
-      <span class="grow"></span><a class="btn primary" href="#novo">+ Novo lote</a>
-    </div><div id="lista"><p class="muted">Carregando…</p></div>`;
-  let posts = [];
+    </div><div id="lista"><p class="muted">Carregando…</p></div><div id="selbar"></div>`;
+  let posts = [], vis = [];
+  const marcados = new Set();
   async function carregar() {
-    let q = sb.from("esteira_posts").select("id,lote_id,loja,tipo,status,dados,fotos,capa,editando_por,editando_em,updated_at,atualizado_por,created_at,erro").order("created_at", { ascending: false }).limit(300);
+    let q = sb.from("esteira_posts").select("*").order("created_at", { ascending: false }).limit(300);
     if (filtroLote) q = q.eq("lote_id", filtroLote);
-    posts = ok(await q); desenhar();
+    posts = ok(await q);
+    for (const id of [...marcados]) if (!posts.some(p => p.id === id)) marcados.delete(id);
+    desenhar();
+  }
+  function barra() {
+    const n = marcados.size;
+    $("#selbar").innerHTML = n ? `<div class="selbar"><b>${n} selecionado(s)</b><span class="grow"></span>
+      <button class="btn small ghost" id="sLimpa">Limpar</button><button class="btn small" id="sRev">Marcar como revisado</button>
+      <button class="btn small" id="sZip">Baixar (.zip)</button><button class="btn small primary" id="sDrv">Salvar no Drive</button>
+      <span class="small muted" id="sProg" style="width:100%"></span></div>` : "";
+    if (!n) return;
+    $("#sLimpa").onclick = () => { marcados.clear(); desenhar(); };
+    const sel = () => posts.filter(p => marcados.has(p.id));
+    const prog = t => { $("#sProg").textContent = t; };
+    $("#sRev").onclick = async () => {
+      try { ok(await sb.from("esteira_posts").update({ status: "revisado" }).in("id", [...marcados])); toast("Marcados como revisados."); await carregar(); } catch (e) { erro(e); }
+    };
+    $("#sZip").onclick = async () => {
+      const b = $("#sZip"); b.disabled = true;
+      try {
+        const z = new JSZip(), usados = new Set(); let i = 0, falhas = 0;
+        for (const P of sel()) {
+          prog(`Montando ${++i} de ${marcados.size}: ${tituloPost(P)}…`);
+          try {
+            let pasta = tituloPost(P); while (usados.has(pasta)) pasta += " (2)"; usados.add(pasta);
+            for (const f of await arquivosDoPost(P)) z.file(`${pasta}/${f.nome}`, f.blob);
+          } catch (e) { falhas++; console.error(e); }
+        }
+        prog("Compactando…");
+        baixar(await z.generateAsync({ type: "blob" }), `posts ${new Date().toLocaleDateString("pt-BR").replace(/\//g, "-")}.zip`);
+        prog(falhas ? `${falhas} post(s) não montaram (sem template?).` : "Baixado ✓");
+      } catch (e) { erro(e); }
+      b.disabled = false;
+    };
+    $("#sDrv").onclick = async () => {
+      const b = $("#sDrv"); b.disabled = true; let i = 0, ok_ = 0;
+      for (const P of sel()) {
+        prog(`Salvando ${++i} de ${marcados.size}: ${tituloPost(P)}…`);
+        try { await salvarNoDrive(P, await arquivosDoPost(P)); ok_++; } catch (e) { toast(`${tituloPost(P)}: ${e.message}`, 6000); if (/não foi configurad/.test(e.message)) break; }
+      }
+      prog(`${ok_} de ${marcados.size} salvo(s) no Drive.`); b.disabled = false; await carregar();
+    };
   }
   function desenhar() {
     const fs = $("#fs").value, fl = $("#fl").value, fq = norm($("#fq").value);
-    const vis = posts.filter(p => (!fs || p.status === fs) && (!fl || p.loja === fl) && (!fq || norm(nomeCarro(p.dados || {}) + " " + p.loja).includes(fq)));
-    if (!vis.length) { $("#lista").innerHTML = `<div class="empty"><strong>Nada por aqui</strong>Crie um lote com os ZIPs do WhatsApp em “Novo lote”.</div>`; return; }
-    const agora = Date.now();
-    $("#lista").innerHTML = `<table class="list"><thead><tr><th></th><th>Loja</th><th>Post</th><th>Status</th><th>Atualizado</th></tr></thead><tbody>${vis.map(p => {
+    vis = posts.filter(p => (!fs || p.status === fs) && (!fl || p.loja === fl) && (!fq || norm(tituloPost(p) + " " + lojaLabel(p.loja)).includes(fq)));
+    if (!vis.length) { $("#lista").innerHTML = `<div class="empty"><strong>Nada por aqui</strong>Clique em <b>+ Novo lote</b> e arraste os ZIPs do WhatsApp.</div>`; barra(); return; }
+    const agora = Date.now(), todos = vis.every(p => marcados.has(p.id));
+    $("#lista").innerHTML = `<table class="list"><thead><tr><th class="ck"><input type="checkbox" id="ckAll" ${todos ? "checked" : ""} title="Selecionar todos"></th><th></th><th>Loja</th><th>Post</th><th>Status</th><th>Atualizado</th></tr></thead><tbody>${vis.map(p => {
       const lock = p.editando_por && p.editando_por !== S.email && agora - new Date(p.editando_em) < 180000;
       const titulo = p.tipo === "comunicado" ? (p.dados?.comunicado || "").slice(0, 60) : nomeCarro({ ...p.dados, tipo: p.tipo });
-      return `<tr class="click" data-id="${p.id}"><td><img class="thumb" data-path="${esc(p.fotos?.[p.capa || 0]?.path || "")}" alt=""></td>
+      return `<tr class="click" data-id="${p.id}"><td class="ck"><input type="checkbox" data-ck="${p.id}" ${marcados.has(p.id) ? "checked" : ""}></td>
+        <td><img class="thumb" data-path="${esc(p.fotos?.[p.capa || 0]?.path || "")}" alt=""></td>
         <td>${esc(lojaLabel(p.loja))}</td><td><b>${esc(titulo)}</b><div class="small muted">${TIPOS[p.tipo] || p.tipo}${p.erro ? " · " + esc(p.erro) : ""}</div></td>
         <td><span class="pill ${p.status}">${STATUS[p.status] || p.status}</span>${lock ? ` <span class="pill lock">✎ ${esc(p.editando_por.split("@")[0])}</span>` : ""}</td>
         <td class="small muted">${fmtData(p.updated_at)}${p.atualizado_por ? "<br>" + esc(p.atualizado_por.split("@")[0]) : ""}</td></tr>`;
     }).join("")}</tbody></table>`;
-    $$("#lista tr.click").forEach(tr => tr.onclick = () => location.hash = "post/" + tr.dataset.id);
+    $$("#lista tr.click").forEach(tr => tr.onclick = e => { if (e.target.closest(".ck")) return; location.hash = "post/" + tr.dataset.id; });
+    $$("#lista [data-ck]").forEach(c => c.onchange = () => { c.checked ? marcados.add(c.dataset.ck) : marcados.delete(c.dataset.ck); $("#ckAll").checked = vis.every(p => marcados.has(p.id)); barra(); });
+    $("#ckAll").onchange = e => { vis.forEach(p => e.target.checked ? marcados.add(p.id) : marcados.delete(p.id)); desenhar(); };
     $$("#lista img[data-path]").forEach(async img => { if (img.dataset.path) try { img.src = await fileUrl(img.dataset.path); } catch (e) {} });
+    barra();
   }
   ["fs", "fl"].forEach(id => $("#" + id).onchange = desenhar); $("#fq").oninput = desenhar;
   await carregar();
@@ -232,10 +350,19 @@ async function viewFila(filtroLote) {
 }
 
 // ---------------- NOVO LOTE ----------------
+const FOTOS_CARROSSEL = 8;   // capa + 8 fotos + CTA = 10 cards
+// fotos que entram no post: a capa primeiro, depois as outras marcadas, na ordem do ZIP
+const fotosEscolhidas = it => [it.capa, ...it.sel.filter(i => i !== it.capa)].filter(i => i != null);
+function escolhaPadrao(it) {
+  it.capa = it.fotos.length ? 0 : null;
+  it.sel = it.tipo === "anuncio" || it.tipo === "imovel" ? it.fotos.map((_, i) => i).slice(0, FOTOS_CARROSSEL + 1) : it.fotos.length ? [0] : [];
+}
 async function viewNovo() {
-  const lojas = S.lojas.filter(l => l.ativo !== false && (tplDo(l.nome, "anuncio") || tplDo(l.nome, "vendido") || tplDo(l.nome, "imovel")));
+  const lojas = S.lojas.filter(l => l.ativo !== false && (tplDo(l.nome, "anuncio") || tplDo(l.nome, "vendido") || tplDo(l.nome, "imovel")))
+    .sort((a, b) => lojaLabel(a.nome).localeCompare(lojaLabel(b.nome), "pt-BR"));
   const m = $("#main");
-  m.innerHTML = `<h1>Novo lote</h1><p class="sub">Arraste os ZIPs do WhatsApp (um por carro). Pode arrastar fotos soltas também: viram um carro só.</p>
+  m.innerHTML = `<a href="#fila" class="muted small">← Posts</a><h1>Novo lote</h1>
+    <p class="sub">Arraste os ZIPs do WhatsApp, um por carro. Fotos soltas também funcionam e viram um carro só.</p>
     <label class="drop" id="drop">Solte os ZIPs aqui ou <u>clique para escolher</u><input type="file" id="fi" multiple accept=".zip,image/*" hidden></label>
     <div id="rows" class="card hidden" style="padding:0;margin-top:14px"></div>
     <div class="row hidden" id="acts" style="margin-top:14px"><span class="grow muted small" id="resumo"></span><button class="btn primary" id="criar">Criar lote e enviar fotos</button></div>
@@ -244,7 +371,8 @@ async function viewNovo() {
   const lojaOpts = sel => `<option value="">Escolha a loja…</option>` + lojas.map(l => `<option value="${esc(l.nome)}" ${l.nome === sel ? "selected" : ""}>${esc(lojaLabel(l.nome))}</option>`).join("");
   function adivinharLoja(texto) {
     const n = norm(texto);
-    return (lojas.find(l => n.includes(norm(l.nome))) || lojas.find(l => { const p = norm(lojaLabel(l.nome)).split(" ")[0]; return p.length > 2 && n.includes(p); }))?.nome || "";
+    return (lojas.find(l => n.includes(norm(lojaLabel(l.nome)))) || lojas.find(l => n.includes(norm(l.nome)))
+      || lojas.find(l => { const p = norm(lojaLabel(l.nome)).split(" ")[0]; return p.length > 2 && n.includes(p); }))?.nome || "";
   }
   async function addArquivos(files) {
     const soltas = [];
@@ -260,36 +388,48 @@ async function viewNovo() {
           }
           const heic = ents.some(e => /\.heic$/i.test(e.name));
           const msg = chat ? textoDoChat(chat) : "";
-          itens.push({ nome: f.name, fotos, loja: adivinharLoja(f.name + " " + chat.slice(0, 400)), tipo: /vendid/i.test(f.name + msg) ? "vendido" : "anuncio", mensagem: msg, aviso: heic ? "Tem fotos HEIC (iPhone) que o navegador não lê: mande em JPG." : "" });
+          const it = { nome: f.name, fotos, loja: adivinharLoja(f.name + " " + chat.slice(0, 400)), tipo: /vendid/i.test(f.name + msg) ? "vendido" : "anuncio", mensagem: msg, aviso: heic ? "Tem fotos HEIC (iPhone) que o navegador não lê: mande em JPG." : "" };
+          escolhaPadrao(it); itens.push(it);
         } catch (e) { toast("Não consegui abrir " + f.name); }
       } else if (/^image\//.test(f.type)) soltas.push(f);
     }
-    if (soltas.length) itens.push({ nome: "Fotos soltas", fotos: soltas, loja: "", tipo: "anuncio", mensagem: "" });
+    if (soltas.length) { const it = { nome: "Fotos soltas", fotos: soltas, loja: "", tipo: "anuncio", mensagem: "" }; escolhaPadrao(it); itens.push(it); }
     desenhar();
   }
+  const urlDe = (it, f) => (it._u = it._u || {})[f.name] || (it._u[f.name] = URL.createObjectURL(f));
   function desenhar() {
     $("#rows").classList.toggle("hidden", !itens.length); $("#acts").classList.toggle("hidden", !itens.length);
     $("#rows").innerHTML = itens.map((it, i) => {
       const tipos = it.loja ? tiposDaLoja(it.loja).filter(t => t !== "comunicado") : ["anuncio", "vendido"];
-      return `<div class="lote-row" data-i="${i}">
-      <div class="ph" data-ph="${i}"></div>
-      <div><div class="small muted">${esc(it.nome)} · ${it.fotos.length} foto(s)${it.aviso ? ` · <b style="color:var(--bad)">${esc(it.aviso)}</b>` : ""}</div>
+      const carrossel = it.tipo === "anuncio" || it.tipo === "imovel", esc_ = fotosEscolhidas(it);
+      return `<div class="lote-item" data-i="${i}"><div class="lote-row">
+      <div><div class="small muted">${esc(it.nome)}${it.aviso ? ` · <b style="color:var(--bad)">${esc(it.aviso)}</b>` : ""}</div>
         <textarea data-k="mensagem" placeholder="Cole aqui a mensagem do lojista (modelo, ano, km, valor…)">${esc(it.mensagem)}</textarea></div>
       <div><label class="f">Loja</label><select data-k="loja">${lojaOpts(it.loja)}</select></div>
       <div><label class="f">Tipo</label><select data-k="tipo">${tipos.map(t => `<option value="${t}" ${t === it.tipo ? "selected" : ""}>${TIPOS[t]}</option>`).join("")}</select></div>
-      <button class="btn small ghost" data-rm="${i}" title="Tirar">×</button></div>`;
+      <button class="btn small ghost" data-rm="${i}" title="Tirar este item">×</button></div>
+      ${it.fotos.length ? `<div class="pick-h">${carrossel
+        ? `<b>${esc_.length} de ${it.fotos.length} fotos</b> vão para o carrossel (recomendado: capa + ${FOTOS_CARROSSEL}). Clique na foto para marcar ou desmarcar; “capa” escolhe a foto da arte. A CTA entra sozinha no fim. Só as marcadas são enviadas.`
+        : `<b>Escolha a foto da arte</b> (“capa”). Só ela é enviada.`}</div>
+      <div class="pick">${it.fotos.map((f, k) => { const on = esc_.includes(k), pos = esc_.indexOf(k);
+        return `<div class="ft ${on ? "on" : ""} ${k === it.capa ? "capa" : ""}" data-f="${k}"><img src="${urlDe(it, f)}" alt="">${on ? `<span class="n">${pos + 1}</span>` : ""}<button class="cp" data-cp="${k}">${k === it.capa ? "capa" : "★"}</button></div>`; }).join("")}</div>` : ""}
+      </div>`;
     }).join("");
-    itens.forEach((it, i) => {
-      const box = $(`[data-ph="${i}"]`);
-      it.fotos.slice(0, 4).forEach(f => { const im = document.createElement("img"); im.src = it._u?.[f.name] || (it._u = it._u || {}, it._u[f.name] = URL.createObjectURL(f)); box.appendChild(im); });
-    });
     $$("#rows [data-k]").forEach(el => el.onchange = el.oninput = () => {
       const it = itens[el.closest("[data-i]").dataset.i]; it[el.dataset.k] = el.value;
-      if (el.dataset.k === "loja") desenhar();
+      if (el.dataset.k === "tipo") escolhaPadrao(it);
+      if (el.dataset.k !== "mensagem") desenhar();
     });
     $$("#rows [data-rm]").forEach(b => b.onclick = () => { itens.splice(+b.dataset.rm, 1); desenhar(); });
-    const falta = itens.filter(i => !i.loja).length;
-    $("#resumo").textContent = `${itens.length} item(ns)` + (falta ? ` · ${falta} sem loja` : "");
+    $$("#rows .ft").forEach(el => el.onclick = e => {
+      const it = itens[el.closest("[data-i]").dataset.i], k = +el.dataset.f, carrossel = it.tipo === "anuncio" || it.tipo === "imovel";
+      if (e.target.closest("[data-cp]") || !carrossel) { it.capa = k; if (!it.sel.includes(k)) it.sel = carrossel ? [...it.sel, k] : [k]; if (!carrossel) it.sel = [k]; }
+      else if (it.sel.includes(k)) { if (k === it.capa) return toast("Essa é a capa. Escolha outra capa antes de tirar."); it.sel = it.sel.filter(x => x !== k); }
+      else it.sel = [...it.sel, k].sort((a, b) => a - b);
+      desenhar();
+    });
+    const falta = itens.filter(i => !i.loja).length, fotos = itens.reduce((s, it) => s + fotosEscolhidas(it).length, 0);
+    $("#resumo").textContent = `${itens.length} item(ns) · ${fotos} foto(s) para enviar` + (falta ? ` · ${falta} sem loja` : "");
   }
   const drop = $("#drop");
   drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
@@ -298,24 +438,24 @@ async function viewNovo() {
   $("#fi").onchange = e => { addArquivos([...e.target.files]); e.target.value = ""; };
   $("#criar").onclick = async () => {
     if (itens.some(i => !i.loja)) return toast("Escolha a loja de todos os itens.");
-    if (itens.some(i => !i.fotos.length && i.tipo !== "comunicado")) return toast("Tem item sem foto.");
+    if (itens.some(i => !fotosEscolhidas(i).length && i.tipo !== "comunicado")) return toast("Tem item sem foto marcada.");
     $("#criar").disabled = true; $("#progbox").classList.remove("hidden");
     try {
       const lote = ok(await sb.from("esteira_lotes").insert({ nome: new Date().toLocaleString("pt-BR") }).select().single());
-      const total = itens.reduce((s, i) => s + i.fotos.length, 0); let feito = 0;
+      const total = itens.reduce((s, it) => s + fotosEscolhidas(it).length, 0); let feito = 0;
       for (const it of itens) {
         const id = uuid(), fotos = [];
-        for (let k = 0; k < it.fotos.length; k++) {
+        for (const [k, idx] of fotosEscolhidas(it).entries()) {
           $("#progtxt").textContent = `Enviando fotos (${feito + 1}/${total})…`;
-          const c = await comprimir(it.fotos[k]);
+          const c = await comprimir(it.fotos[idx]);
           const path = `fotos/${id}/${String(k + 1).padStart(2, "0")}.jpg`;
           ok(await sb.storage.from("esteira").upload(path, c.blob, { contentType: "image/jpeg", upsert: true }));
-          fotos.push({ path, w: c.w, h: c.h, nome: it.fotos[k].name });
+          fotos.push({ path, w: c.w, h: c.h, nome: it.fotos[idx].name });
           feito++; $("#progbar").style.width = (100 * feito / total) + "%";
         }
         const dados = { ...parseMensagem(it.mensagem), tipo: it.tipo };
         ok(await sb.from("esteira_posts").insert({ id, lote_id: lote.id, loja: it.loja, tipo: it.tipo, mensagem: it.mensagem, fotos, dados, status: "novo",
-          ordem: fotos.map((_, i) => i).filter(i => i !== 0) }));
+          capa: 0, ordem: fotos.map((_, i) => i).filter(i => i !== 0) }));
       }
       // IA em segundo plano (se configurada): processa o lote
       $("#progtxt").textContent = "Lendo as mensagens com IA…";
@@ -367,11 +507,10 @@ async function viewPost(id) {
   const imovel = P.tipo === "imovel", comunicado = P.tipo === "comunicado";
   const campos = imovel ? CAMPOS_IMOVEL : CAMPOS_CARRO;
   let tpl = tplDo(P.loja, P.tipo, P.variacao);
-  const fundoDe = t => t?.render?.fundo_camada ? S.tpls.find(x => x.loja === t.loja && x.arte === t.render.fundo_camada && x.variacao === t.variacao) || S.tpls.find(x => x.loja === t.loja && x.arte === t.render.fundo_camada) : null;
   if (P.ordem == null) P.ordem = (P.fotos || []).map((_, i) => i).filter(i => i !== (P.capa || 0));
   const vars = variacoes(P.loja, P.tipo);
 
-  m.innerHTML = `<a href="#fila" class="muted small">← Fila</a>
+  m.innerHTML = `<a href="#fila" class="muted small">← Posts</a>
     <div id="lockbar"></div>
     <div class="row" style="margin:6px 0 16px"><div class="grow"><h1 style="margin:0">${esc(lojaLabel(P.loja))}</h1><span class="muted small">${TIPOS[P.tipo]} · criado por ${esc((P.criado_por || "").split("@")[0])} ${fmtData(P.created_at)}</span></div>
       <select id="st" style="max-width:190px">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${P.status === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
@@ -392,7 +531,11 @@ async function viewPost(id) {
           ${comunicado ? `<textarea id="com" rows="7">${esc(P.dados?.comunicado || "")}</textarea>` :
           `<details ${P.mensagem ? "" : "open"}><summary>Mensagem do lojista</summary><textarea id="msg" rows="4">${esc(P.mensagem || "")}</textarea>
              <button class="btn small ghost" id="reler" style="margin-top:6px">Ler de novo (sem IA)</button></details>
-           <div class="grid2" id="campos">${campos.map(([k, l]) => `<div><label class="f">${l}</label><input data-c="${k}" value="${esc(P.dados?.[k] ?? "")}"></div>`).join("")}</div>`}
+           <div id="campos">${(() => {
+             const inp = ([k, l]) => `<div><label class="f">${l}</label><input data-c="${k}" value="${esc(P.dados?.[k] ?? "")}"></div>`;
+             const usados = camposDaArte(tpl), naArte = tpl ? campos.filter(([k]) => usados.has(k)) : campos, outros = campos.filter(c => !naArte.includes(c));
+             return `<div class="grid2">${naArte.map(inp).join("")}</div>${outros.length ? `<details style="margin-top:10px"><summary>Outros dados (não aparecem na arte, só ajudam a escrever a legenda)</summary><div class="grid2">${outros.map(inp).join("")}</div></details>` : ""}`;
+           })()}</div>`}
         </div>
         <div class="card" style="margin-bottom:12px"><h2>Textos da capa</h2><p class="small muted" style="margin-top:-6px">Saem dos dados. Se mudar algum aqui, ele fica fixo (↺ volta ao automático).</p><div id="boxes"></div></div>
         ${comunicado ? "" : `<div class="card" style="margin-bottom:12px"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Legenda</h2>
@@ -483,6 +626,13 @@ async function viewPost(id) {
       e.stopPropagation(); const i = +b.dataset.x; if (i === (P.capa || 0)) return;
       P.ordem = P.ordem.includes(i) ? P.ordem.filter(x => x !== i) : [...P.ordem, i]; desenharStrip(); mudou();
     });
+    // a CTA da loja fecha o carrossel (entra sozinha no download)
+    const cta = (P.tipo === "anuncio" || P.tipo === "imovel") && ctaDe(P.loja);
+    if (cta) {
+      const d = document.createElement("div"); d.className = "it cta"; d.title = "CTA da loja: entra sozinha no fim do carrossel";
+      d.innerHTML = `<img alt="CTA"><span class="lb">CTA</span>`; st.appendChild(d);
+      fileUrl(cta.camada_path).then(u => { d.querySelector("img").src = u; }).catch(() => {});
+    }
   }
 
   // arrastar/zoom da foto
@@ -563,56 +713,17 @@ async function viewPost(id) {
 
   // saídas
   async function capaCanvas() { await desenhar(); const c = document.createElement("canvas"); c.width = E.canvas.width; c.height = E.canvas.height; c.getContext("2d").drawImage(E.canvas, 0, 0); return c; }
-  async function arquivos() {
-    const out = [], pad = n => String(n).padStart(2, "0");
-    out.push({ nome: `${pad(1)} - capa.png`, blob: await canvasBlob(await capaCanvas()) });
-    if (P.tipo === "anuncio" || P.tipo === "imovel") {
-      let n = 2;
-      for (const i of P.ordem) {
-        const img = fotoImgs[i]; if (!img) continue;
-        const cv = R.renderFotoSolta(img, tpl.largura, tpl.altura, P.fotos_pos?.[i]);
-        out.push({ nome: `${pad(n++)} - foto.jpg`, blob: await canvasBlob(cv, "image/jpeg", 0.92) });
-      }
-      const cta = S.tpls.find(t => t.loja === P.loja && t.tipo === "cta" && t.liberado);
-      if (cta) {
-        const im = await storageImg(cta.camada_path); const cv = document.createElement("canvas"); cv.width = cta.largura; cv.height = cta.altura;
-        cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height); out.push({ nome: `${pad(n++)} - cta.png`, blob: await canvasBlob(cv) });
-      }
-      const site = tplDo(P.loja, "site");
-      if (site) {
-        const img = fotoImgs[P.capa || 0]; const camada = await storageImg(site.camada_path);
-        const cv = R.renderArte({ tpl: site, camada, foto: img ? { img } : null, textos: R.textosPadrao(site, dadosAtuais()) });
-        out.push({ nome: `site.png`, blob: await canvasBlob(cv) });
-      }
-    }
-    if (P.legenda) out.push({ nome: "legenda.txt", blob: new Blob([P.legenda], { type: "text/plain;charset=utf-8" }) });
-    return out;
-  }
+  async function arquivos() { await salvar(); return arquivosDoPost({ ...P, id }); }
   $("#bcapa").onclick = async () => { const c = await capaCanvas(); baixar(await canvasBlob(c), `${comunicado ? "COMUNICADO " + lojaLabel(P.loja) : nomeCarro(dadosAtuais())} - capa.png`); };
   $("#bzip") && ($("#bzip").onclick = async () => {
-    const z = new JSZip(); for (const f of await arquivos()) z.file(f.nome, f.blob);
-    baixar(await z.generateAsync({ type: "blob" }), nomeCarro(dadosAtuais()) + ".zip");
+    try { const z = new JSZip(); for (const f of await arquivos()) z.file(f.nome, f.blob); baixar(await z.generateAsync({ type: "blob" }), nomeCarro(dadosAtuais()) + ".zip"); }
+    catch (e) { erro(e); }
   });
   $("#bdrive").onclick = async () => {
-    const loja = lojaObj(P.loja);
-    if (!loja.drive_pasta_id) return toast("Falta configurar a pasta do Drive desta loja (aba Lojas e templates).");
     const b = $("#bdrive"); b.disabled = true; const bar = $("#drvprog"); bar.classList.remove("hidden");
     try {
-      await salvar();
-      const fs = await arquivos();
-      const hoje = new Date();
-      const padrao = (P.tipo === "vendido" && loja.dados?.drive_padrao_vendido) || (comunicado && loja.dados?.drive_padrao_comunicado) || loja.drive_padrao || "{CARRO}";
-      const nome = comunicado ? "COMUNICADO " + hoje.toLocaleDateString("pt-BR").replace(/\//g, "-") : (P.tipo === "vendido" ? "VENDIDO " : "") + nomeCarro(dadosAtuais());
-      const caminho = padrao.replace(/\{MES_NUM\}/g, String(hoje.getMonth() + 1).padStart(2, "0")).replace(/\{MES_NOME\}/g, MESES[hoje.getMonth()])
-        .replace(/\{ANO\}/g, hoje.getFullYear()).replace(/\{CARRO\}/g, nome).replace(/\{TIPO\}/g, TIPOS[P.tipo].toUpperCase());
-      const pasta = await fn("esteira-drive", { acao: "pasta", base: loja.drive_pasta_id, caminho });
-      let n = 0;
-      for (const f of fs) {
-        await fn("esteira-drive", { acao: "arquivo", pasta: pasta.id, nome: f.nome, mime: f.blob.type || "application/octet-stream", base64: await blobB64(f.blob) });
-        bar.querySelector("i").style.width = (100 * ++n / fs.length) + "%";
-      }
-      P.drive_url = pasta.url; P.status = "salvo"; $("#st").value = "salvo";
-      ok(await sb.from("esteira_posts").update({ drive_url: pasta.url, status: "salvo" }).eq("id", id));
+      const url = await salvarNoDrive({ ...P, id }, await arquivos(), (n, t) => { bar.querySelector("i").style.width = (100 * n / t) + "%"; });
+      P.drive_url = url; P.status = "salvo"; $("#st").value = "salvo";
       toast("Salvo no Drive ✓");
     } catch (e) { erro(e); }
     b.disabled = false; bar.classList.add("hidden");
@@ -649,10 +760,16 @@ async function viewComunicado() {
   $("#main").innerHTML = `<h1>Comunicados</h1><p class="sub">Escreva o assunto uma vez, marque as lojas e a IA escreve um texto diferente para cada uma. Depois é só revisar na fila.</p>
     <div class="card" style="margin-bottom:12px"><label class="f">Assunto</label><textarea id="ass" rows="4" placeholder="Ex.: sexta 20/11 feriado da Consciência Negra, loja fechada, volta sábado normal"></textarea>
       <label style="display:flex;gap:8px;align-items:center;margin-top:8px" class="small"><input type="checkbox" id="mesmo"> Usar exatamente este texto em todas (sem IA)</label></div>
-    <div class="card"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Lojas (${lojas.length})</h2><button class="btn small ghost" id="todas">Marcar todas</button></div>
-      <div class="grid3">${lojas.map(l => `<label class="small" style="display:flex;gap:8px;align-items:center"><input type="checkbox" value="${esc(l.nome)}" class="lj"> ${esc(lojaLabel(l.nome))}</label>`).join("")}</div></div>
+    <div class="card"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Lojas (${lojas.length}) <span class="small muted" id="nmarc"></span></h2>
+        <input id="cq" class="search" placeholder="Buscar loja…"><button class="btn small ghost" id="todas">Marcar todas</button><button class="btn small ghost" id="nenhuma">Desmarcar</button></div>
+      <div class="grid3">${[...lojas].sort((a, b) => lojaLabel(a.nome).localeCompare(lojaLabel(b.nome), "pt-BR")).map(l => `<label class="small" data-nm="${esc(norm(lojaLabel(l.nome)))}" style="display:flex;gap:8px;align-items:center"><input type="checkbox" value="${esc(l.nome)}" class="lj"> ${esc(lojaLabel(l.nome))}</label>`).join("")}</div></div>
     <div class="row" style="margin-top:14px"><span class="grow small muted" id="cst"></span><button class="btn primary" id="gerar">Criar comunicados</button></div>`;
-  $("#todas").onclick = () => $$(".lj").forEach(c => c.checked = true);
+  const conta = () => { const n = $$(".lj:checked").length; $("#nmarc").textContent = n ? `· ${n} marcada(s)` : ""; };
+  const visiveis = () => $$(".lj").filter(c => c.closest("label").style.display !== "none");
+  $("#cq").oninput = e => { const q = norm(e.target.value); $$("[data-nm]").forEach(l => l.style.display = !q || l.dataset.nm.includes(q) ? "flex" : "none"); };
+  $("#todas").onclick = () => { visiveis().forEach(c => c.checked = true); conta(); };
+  $("#nenhuma").onclick = () => { visiveis().forEach(c => c.checked = false); conta(); };
+  $$(".lj").forEach(c => c.onchange = conta);
   $("#gerar").onclick = async () => {
     const assunto = $("#ass").value.trim(), sel = $$(".lj:checked").map(c => c.value);
     if (!assunto || !sel.length) return toast("Escreva o assunto e marque as lojas.");
@@ -674,53 +791,88 @@ async function viewComunicado() {
 }
 
 // ---------------- LOJAS E TEMPLATES ----------------
+const ARTES = {
+  anuncio: { nome: "Anúncio (capa do carro)", arte: "FEED" },
+  vendido: { nome: "Vendido", arte: "VENDIDO FEED" },
+  comunicado: { nome: "Comunicado", arte: "COMUNICADO FEED" },
+  cta: { nome: "CTA (último card do carrossel)", arte: "CTA" },
+  imovel: { nome: "Imóvel", arte: "IMOVEIS FEED" },
+  site: { nome: "Site", arte: "SITE" },
+};
+const nomeArte = t => (ARTES[t.tipo]?.nome.split(" (")[0] || t.arte) + (t.variacao && t.variacao !== "padrao" ? ` · ${t.variacao}` : "");
+// janela por cima da página (fecha no ×, no Esc ou clicando fora)
+function abrirModal(html, onClose) {
+  const w = document.createElement("div"); w.className = "modal";
+  w.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><button class="fechar" aria-label="Fechar" title="Fechar">×</button>${html}</div>`;
+  document.body.appendChild(w);
+  const k = e => { if (e.key === "Escape") fechar(); };
+  function fechar() { if (!w.isConnected) return; w.remove(); document.removeEventListener("keydown", k); onClose && onClose(); }
+  document.addEventListener("keydown", k);
+  w.onmousedown = e => { if (e.target === w) fechar(); };
+  $(".fechar", w).onclick = fechar;
+  leaveHooks.push(fechar);
+  return { el: $(".sheet", w), fechar };
+}
+// clientes ativos primeiro, depois os outros
+const clientesOrdenados = () => [...S.clients].sort((a, b) => ((a.status || "ativo") === "encerrado") - ((b.status || "ativo") === "encerrado") || a.name.localeCompare(b.name, "pt-BR"));
+
 async function viewLojas() {
   const m = $("#main");
-  const tpLoja = n => S.tpls.filter(t => t.loja === n);
-  m.innerHTML = `<h1>Lojas e templates</h1><p class="sub">${S.admin ? "Configure cada loja (cliente do sistema, pasta do Drive, legenda) e importe os templates." : "Só administradores alteram esta parte."}</p>
-    ${S.admin ? `<div class="card" style="margin-bottom:14px"><h2>Importar templates</h2>
-      <p class="small muted" style="margin-top:-4px">Escolha a pasta <b>esteira-2l</b> do computador (tem as pastas camadas, fontes e build). Os ajustes feitos aqui na plataforma não são apagados.</p>
-      <div class="row"><input type="file" id="pasta" webkitdirectory directory multiple style="max-width:420px"><button class="btn primary" id="imp">Importar</button>
-      <button class="btn ghost" id="vinc" title="Liga cada loja ao cliente de mesmo nome no cadastro">Vincular clientes pelo nome</button></div>
-      <div id="impbox" class="hidden"><div class="prog"><i id="impbar"></i></div><span class="small" id="imptxt"></span></div></div>` : ""}
-    ${!S.lojas.length ? `<div class="empty"><strong>Nenhuma loja ainda</strong>Importe os templates acima.</div>` :
-    `<table class="list"><thead><tr><th>Loja</th><th>Cliente no sistema</th><th>Templates</th><th>Drive</th><th></th></tr></thead><tbody>${S.lojas.map(l => {
-      const ts = tpLoja(l.nome), lib = ts.filter(t => t.liberado && t.tipo !== "fundo").length, tot = ts.filter(t => t.tipo !== "fundo").length;
-      const c = S.clients.find(c => c.id === l.client_id);
-      return `<tr><td><b>${esc(l.nome)}</b></td><td>${c ? esc(c.name) : `<span class="muted">—</span>`}</td>
-        <td>${lib}/${tot} liberados${lib < tot ? ` <span class="pill erro">${tot - lib} bloqueado(s)</span>` : ""}</td>
-        <td>${l.drive_pasta_id ? "✓" : `<span class="muted">—</span>`}</td><td><button class="btn small ghost" data-ed="${esc(l.nome)}">Abrir</button></td></tr>
-        <tr class="hidden" data-edrow="${esc(l.nome)}"><td colspan="5"></td></tr>`;
-    }).join("")}</tbody></table>`}`;
+  const tpLoja = n => S.tpls.filter(t => t.loja === n && t.tipo !== "fundo");
+  const lista = [...S.lojas].sort((a, b) => lojaLabel(a.nome).localeCompare(lojaLabel(b.nome), "pt-BR"));
+  const semCli = lista.filter(l => !l.client_id).length;
+  m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Lojas</h1>${S.admin ? `<button class="btn primary" id="novoTpl">+ Template</button>` : ""}</div>
+    <p class="sub">Cada loja é um cliente do 2L Core com os templates dele. Clique na loja para ver o Drive, o modelo de legenda e as artes.${S.admin ? "" : " Só administradores alteram esta parte."}</p>
+    ${semCli && S.admin ? `<div class="lockbar">${semCli} loja(s) sem cliente ligado. Abra a loja e escolha o cliente, ou <button class="btn small ghost" id="vinc">Ligar pelo nome</button></div>` : ""}
+    <div class="row" style="margin-bottom:12px"><input id="lq" class="search" placeholder="Buscar loja…"></div>
+    <div id="ll"></div>
+    ${S.admin ? `<details style="margin-top:22px"><summary>Importar pacote de templates do computador (pasta esteira-2l)</summary><div class="card" style="margin-top:8px">
+      <p class="small muted" style="margin-top:0">Só serve para atualizar os templates feitos pelo pacote do computador. Para cliente novo, use <b>+ Template</b>. Ajustes feitos aqui não são apagados.</p>
+      <div class="row"><input type="file" id="pasta" webkitdirectory directory multiple style="max-width:420px"><button class="btn primary" id="imp">Importar</button></div>
+      <div id="impbox" class="hidden"><div class="prog"><i id="impbar"></i></div><span class="small" id="imptxt"></span></div></div></details>` : ""}`;
+  function desenhar() {
+    const q = norm($("#lq").value);
+    const vis = lista.filter(l => !q || norm(lojaLabel(l.nome) + " " + l.nome).includes(q));
+    $("#ll").innerHTML = !S.lojas.length ? `<div class="empty"><strong>Nenhuma loja ainda</strong>Clique em + Template para cadastrar a primeira.</div>`
+      : !vis.length ? `<div class="empty">Nenhuma loja com esse nome.</div>`
+      : `<table class="list"><thead><tr><th>Loja</th><th>Artes</th><th>Drive</th><th>Legenda</th></tr></thead><tbody>${vis.map(l => {
+        const ts = tpLoja(l.nome), lib = ts.filter(t => t.liberado);
+        return `<tr class="click" data-ed="${esc(l.nome)}"><td><b>${esc(lojaLabel(l.nome))}</b>${!l.client_id ? ` <span class="pill erro">sem cliente</span>` : ""}${l.ativo === false ? ` <span class="pill">inativa</span>` : ""}</td>
+          <td class="small">${esc([...new Set(lib.map(nomeArte))].join(", ")) || "—"}${lib.length < ts.length ? ` <span class="pill erro">${ts.length - lib.length} bloqueada(s)</span>` : ""}</td>
+          <td>${l.drive_pasta_id ? "✓" : `<span class="muted">—</span>`}</td><td>${l.legenda_modelo ? "✓" : `<span class="muted">—</span>`}</td></tr>`;
+      }).join("")}</tbody></table>`;
+    $$("#ll [data-ed]").forEach(tr => tr.onclick = () => editarLoja(tr.dataset.ed));
+  }
+  $("#lq").oninput = desenhar; desenhar();
   if (S.admin) {
     $("#imp").onclick = () => importar($("#pasta").files).catch(erro);
-    $("#vinc").onclick = vincularClientes;
+    $("#vinc") && ($("#vinc").onclick = vincularClientes);
+    $("#novoTpl").onclick = () => novoTemplate();
   }
-  $$("[data-ed]").forEach(b => b.onclick = () => {
-    const nome = b.dataset.ed, tr = $(`[data-edrow="${CSS.escape(nome)}"]`);
-    if (!tr.classList.contains("hidden")) { tr.classList.add("hidden"); return; }
-    tr.classList.remove("hidden"); editarLoja(nome, tr.firstElementChild);
-  });
 }
-function editarLoja(nome, el) {
+function editarLoja(nome) {
   const l = lojaObj(nome), d = l.dados || {}, dis = S.admin ? "" : "disabled";
-  const ts = S.tpls.filter(t => t.loja === nome).sort((a, b) => a.arte.localeCompare(b.arte));
-  el.innerHTML = `<div class="grid2" style="padding:6px 0">
-    <div><label class="f">Cliente no sistema</label><select id="e_cli" ${dis}><option value="">—</option>${S.clients.map(c => `<option value="${c.id}" ${c.id === l.client_id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
-    <div><label class="f">ID da pasta base no Drive (o código no fim do link da pasta)</label><input id="e_drv" value="${esc(l.drive_pasta_id || "")}" ${dis}></div>
-    <div><label class="f">Subpastas dos carros ({MES_NUM}, {MES_NOME}, {ANO}, {CARRO})</label><input id="e_pad" value="${esc(l.drive_padrao || "")}" ${dis}></div>
-    <div><label class="f">Subpastas dos vendidos (vazio = igual aos carros)</label><input id="e_padv" value="${esc(d.drive_padrao_vendido || "")}" ${dis}></div>
-    <div><label class="f">Endereço</label><input id="e_end" value="${esc(d.endereco || "")}" ${dis}></div>
-    <div><label class="f">WhatsApp</label><input id="e_wpp" value="${esc(d.whatsapp || "")}" ${dis}></div>
-    <div><label class="f">Site / Instagram</label><input id="e_site" value="${esc(d.site || "")}" ${dis}></div>
-    <div><label class="f">Ativa</label><select id="e_at" ${dis}><option value="1" ${l.ativo !== false ? "selected" : ""}>Sim</option><option value="0" ${l.ativo === false ? "selected" : ""}>Não</option></select></div>
-  </div>
-  <label class="f">Modelo de legenda (cole uma legenda real da loja; a IA segue o formato)</label><textarea id="e_leg" rows="8" ${dis}>${esc(l.legenda_modelo || "")}</textarea>
-  ${S.admin ? `<div class="row" style="margin:8px 0 14px"><button class="btn primary small" id="e_save">Salvar loja</button></div>` : ""}
-  <table class="list" style="margin-bottom:8px"><thead><tr><th>Arte</th><th>Variação</th><th>Tamanho</th><th>Status</th><th></th></tr></thead><tbody>${ts.map(t => `<tr>
-    <td>${esc(t.arte)}</td><td>${esc(t.variacao)}</td><td class="small">${t.largura}×${t.altura}</td>
-    <td>${t.liberado ? `<span class="pill salvo">liberado</span>` : `<span class="pill erro" title="${esc(t.bloqueio || "")}">bloqueado</span><div class="small muted">${esc(t.bloqueio || "")}</div>`}${t.ajustado ? ` <span class="pill">ajustado</span>` : ""}</td>
-    <td>${S.admin ? `<button class="btn small ghost" data-lib="${t.id}">${t.liberado ? "Bloquear" : "Liberar"}</button> ` : ""}${t.caixas?.length ? `<a class="btn small ghost" href="#ajustar/${t.id}">Ajustar</a>` : ""}</td></tr>`).join("")}</tbody></table>`;
+  const ts = S.tpls.filter(t => t.loja === nome && t.tipo !== "fundo").sort((a, b) => nomeArte(a).localeCompare(nomeArte(b)));
+  const { el, fechar } = abrirModal(`<h2 style="margin-right:44px">${esc(lojaLabel(nome))}</h2>
+    ${!l.client_id ? `<p class="small muted" style="margin-top:-6px">Nome no pacote de templates: ${esc(nome)}. Escolha abaixo qual cliente do 2L Core é esta loja.</p>` : ""}
+    <div class="grid2" style="margin:8px 0 10px">
+      <div><label class="f">Cliente do 2L Core</label><select id="e_cli" ${dis}><option value="">— escolha —</option>${clientesOrdenados().map(c => `<option value="${c.id}" ${c.id === l.client_id ? "selected" : ""}>${esc(c.name)}${c.status === "encerrado" ? " (encerrado)" : ""}</option>`).join("")}</select></div>
+      <div><label class="f">Usar na esteira</label><select id="e_at" ${dis}><option value="1" ${l.ativo !== false ? "selected" : ""}>Sim</option><option value="0" ${l.ativo === false ? "selected" : ""}>Não</option></select></div>
+      <div><label class="f">Pasta do Drive da loja (cole o link ou o código)</label><input id="e_drv" value="${esc(l.drive_pasta_id || "")}" ${dis} placeholder="https://drive.google.com/drive/folders/…"></div>
+      <div><label class="f">Subpastas dos carros ({MES_NUM}, {MES_NOME}, {ANO}, {CARRO})</label><input id="e_pad" value="${esc(l.drive_padrao || "")}" ${dis}></div>
+      <div><label class="f">Subpastas dos vendidos (vazio = igual aos carros)</label><input id="e_padv" value="${esc(d.drive_padrao_vendido || "")}" ${dis}></div>
+      <div><label class="f">WhatsApp</label><input id="e_wpp" value="${esc(d.whatsapp || "")}" ${dis}></div>
+      <div><label class="f">Endereço</label><input id="e_end" value="${esc(d.endereco || "")}" ${dis}></div>
+      <div><label class="f">Site / Instagram</label><input id="e_site" value="${esc(d.site || "")}" ${dis}></div>
+    </div>
+    <label class="f">Modelo de legenda (cole uma legenda real da loja; a IA segue o formato)</label><textarea id="e_leg" rows="7" ${dis}>${esc(l.legenda_modelo || "")}</textarea>
+    ${S.admin ? `<div class="row" style="margin:10px 0 4px"><button class="btn primary" id="e_save">Salvar loja</button></div>` : ""}
+    <div class="sec-h"><h2 class="grow">Artes</h2>${S.admin ? `<button class="btn small" id="e_novo">+ Template</button>` : ""}</div>
+    ${ts.length ? `<table class="list"><thead><tr><th>Arte</th><th>Status</th><th></th></tr></thead><tbody>${ts.map(t => `<tr>
+      <td><b>${esc(nomeArte(t))}</b><div class="small muted">${t.largura}×${t.altura}</div></td>
+      <td>${t.liberado ? `<span class="pill salvo">liberada</span>` : `<span class="pill erro" title="${esc(t.bloqueio || "")}">bloqueada</span><div class="small muted">${esc(t.bloqueio || "")}</div>`}${t.ajustado ? ` <span class="pill">ajustada</span>` : ""}</td>
+      <td style="text-align:right">${t.caixas?.length || S.admin ? `<a class="btn small ghost" href="#ajustar/${t.id}" title="Posicionar os textos e a foto da arte">Ajustar textos</a> ` : ""}${S.admin ? `<button class="btn small ghost" data-lib="${t.id}">${t.liberado ? "Bloquear" : "Liberar"}</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty">Esta loja ainda não tem arte. Clique em + Template.</div>`}`);
   if (!S.admin) return;
   $("#e_save", el).onclick = async () => {
     try {
@@ -728,23 +880,126 @@ function editarLoja(nome, el) {
         drive_padrao: $("#e_pad", el).value.trim(), legenda_modelo: $("#e_leg", el).value, ativo: $("#e_at", el).value === "1",
         dados: { ...d, endereco: $("#e_end", el).value, whatsapp: $("#e_wpp", el).value, site: $("#e_site", el).value, drive_padrao_vendido: $("#e_padv", el).value.trim() }, updated_at: new Date().toISOString() };
       ok(await sb.from("esteira_lojas").update(row).eq("nome", nome));
-      Object.assign(l, row); toast("Loja salva ✓");
+      Object.assign(l, row); toast("Loja salva ✓"); fechar(); viewLojas();
     } catch (e) { erro(e); }
   };
+  $("#e_novo", el).onclick = () => { fechar(); novoTemplate(nome); };
   $$("[data-lib]", el).forEach(b => b.onclick = async () => {
     const t = S.tpls.find(x => x.id === b.dataset.lib);
-    try { ok(await sb.from("esteira_templates").update({ liberado: !t.liberado }).eq("id", t.id)); t.liberado = !t.liberado; editarLoja(nome, el); } catch (e) { erro(e); }
+    try { ok(await sb.from("esteira_templates").update({ liberado: !t.liberado }).eq("id", t.id)); t.liberado = !t.liberado; fechar(); editarLoja(nome); } catch (e) { erro(e); }
   });
 }
 async function vincularClientes() {
   const tira = s => norm(s).replace(/\b(VEICULOS|MULTIMARCAS|AUTOMOVEIS|MOTORS|MOTOS|AUTO|CAR)\b/g, "").replace(/\s+/g, " ").trim();
+  const palavras = s => tira(s).split(" ").filter(w => w.length > 1);
+  const clientes = clientesOrdenados();
   let n = 0;
   for (const l of S.lojas.filter(l => !l.client_id)) {
-    const alvo = tira(l.nome);
-    const c = S.clients.find(c => tira(c.name) === alvo) || S.clients.find(c => tira(c.name).startsWith(alvo) || alvo.startsWith(tira(c.name)) && tira(c.name).length > 3);
+    const alvo = tira(l.nome), pa = palavras(l.nome);
+    const c = clientes.find(c => tira(c.name) === alvo)
+      || clientes.find(c => tira(c.name).startsWith(alvo) || alvo.startsWith(tira(c.name)) && tira(c.name).length > 3)
+      || (pa.length && pa.join("").length > 3 ? clientes.find(c => { const pc = palavras(c.name); return pa.every(w => pc.includes(w)); }) : null);
     if (c) { ok(await sb.from("esteira_lojas").update({ client_id: c.id }).eq("nome", l.nome)); l.client_id = c.id; n++; }
   }
-  toast(`${n} loja(s) vinculada(s). Confira as que ficaram sem cliente.`); viewLojas();
+  toast(`${n} loja(s) ligada(s). Abra as que ficaram sem cliente e escolha à mão.`); viewLojas();
+}
+
+// ---- cadastrar template pelo site: PNG transparente + print de referência + fontes ----
+const PESOS = [["thin", 100], ["hairline", 100], ["extralight", 200], ["ultralight", 200], ["light", 300], ["regular", 400], ["book", 400], ["normal", 400],
+  ["medium", 500], ["semibold", 600], ["demibold", 600], ["extrabold", 800], ["ultrabold", 800], ["bold", 700], ["black", 900], ["heavy", 900]];
+// "BigShouldersDisplay-SemiBoldItalic.ttf" -> { familia: "Big Shoulders Display", peso: 600, italico: true }
+function lerFonte(nomeArquivo) {
+  const base = nomeArquivo.replace(/\.(ttf|otf|woff2?)$/i, "").replace(/^fonnts\.com-/i, "");
+  const [fam, ...resto] = base.split(/[-_]/);
+  const estilo = resto.join("").toLowerCase();
+  const peso = (PESOS.find(([k]) => estilo.replace("italic", "").includes(k)) || [, 400])[1];
+  return { familia: fam.replace(/([a-z])([A-Z])/g, "$1 $2").trim(), peso, italico: /italic|oblique/.test(estilo) };
+}
+const familiasFonte = () => [...new Set(["Poppins", ...((S.cfg.fontes?.arquivos) || []).map(a => a.familia)])].sort((a, b) => a.localeCompare(b));
+function caixaPadrao(i, w, fonte, campo, modelo, extra = {}) {
+  return { id: "cx" + Date.now().toString(36) + i, campo, modelo, exemplo: "", top: 80 + i * 90, left: 60, largura: w - 120, alinhamento: "center",
+    entrelinha: 1.2, espacamento: 0, maiusculas: true, fonte, peso: 700, italico: false, tamanho: 52, cor: "#ffffff", ...extra };
+}
+const CAMPOS_PRONTOS = [
+  ["Marca e modelo", "{marca} {modelo}"], ["Versão", "{versao}"], ["Ano", "{ano}"], ["KM", "{km} km"], ["Ano e KM", "{ano} | {km} km"],
+  ["Valor", "R$ {valor}"], ["Valor com centavos", "R$ {valor_cent}"], ["Motor e câmbio", "{motor} {cambio}"], ["Detalhe curto", "{detalhes}"],
+  ["Texto do comunicado", "{comunicado}"], ["Texto fixo", "TEXTO"]];
+function caixasIniciais(tipo, w, fonte) {
+  if (tipo === "anuncio") return [caixaPadrao(0, w, fonte, "Marca e modelo", "{marca} {modelo}"), caixaPadrao(1, w, fonte, "Versão", "{versao}", { peso: 400, tamanho: 38 }), caixaPadrao(2, w, fonte, "Ano e KM", "{ano} | {km} km", { peso: 400, tamanho: 34 })];
+  if (tipo === "vendido") return [caixaPadrao(0, w, fonte, "Marca e modelo", "{marca} {modelo}")];
+  if (tipo === "comunicado") return [caixaPadrao(0, w, fonte, "Texto do comunicado", "{comunicado}", { maiusculas: false, peso: 500, tamanho: 40, multilinha: true, top: 400 })];
+  if (tipo === "imovel") return [caixaPadrao(0, w, fonte, "Tipo e bairro", "{tipo_imovel} {bairro}"), caixaPadrao(1, w, fonte, "Valor", "R$ {valor}")];
+  return [];
+}
+async function registrarFonte(a) {
+  const face = new FontFace(a.familia, `url("${await fileUrl(a.arquivo)}")`, { weight: String(a.peso), style: a.italico ? "italic" : "normal" });
+  await face.load(); document.fonts.add(face);
+}
+function novoTemplate(lojaNome) {
+  const loja = lojaNome ? lojaObj(lojaNome) : null;
+  const { el, fechar } = abrirModal(`<h2 style="margin-right:44px">Novo template</h2>
+    <p class="sub" style="margin-top:-6px">Suba a arte do Canva sem os textos e sem a foto (PNG com fundo transparente), o print da arte pronta e as fontes. Depois você posiciona os textos por cima do print.</p>
+    <div class="grid2">
+      <div><label class="f">Cliente</label>${loja ? `<input value="${esc(lojaLabel(loja.nome))}" disabled>` : `<select id="t_cli"><option value="">— escolha —</option>${clientesOrdenados().filter(c => c.status !== "encerrado").map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>`}</div>
+      <div><label class="f">Arte</label><select id="t_tipo">${Object.entries(ARTES).map(([k, a]) => `<option value="${k}">${a.nome}</option>`).join("")}</select></div>
+      <div><label class="f">PNG da arte sem textos e sem foto (fundo transparente)</label><input type="file" id="t_png" accept="image/png"></div>
+      <div><label class="f">Print da arte pronta (referência, opcional)</label><input type="file" id="t_ref" accept="image/*"></div>
+      <div><label class="f">Fontes usadas (.ttf, .otf; opcional)</label><input type="file" id="t_fon" accept=".ttf,.otf,.woff,.woff2" multiple></div>
+      <div><label class="f">Versão (só se a loja tiver mais de uma arte do mesmo tipo)</label><input id="t_var" value="padrao"></div>
+    </div>
+    <div id="t_fontes" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:14px"><span class="grow small muted" id="t_st"></span><button class="btn primary" id="t_ok">Criar e posicionar os textos</button></div>`);
+  let fontes = [];
+  $("#t_fon", el).onchange = e => {
+    fontes = [...e.target.files].map(f => ({ f, ...lerFonte(f.name) }));
+    $("#t_fontes", el).innerHTML = fontes.length ? `<label class="f">Confira o nome e o peso de cada fonte (igual ao Canva)</label>` + fontes.map((x, i) => `<div class="grid3" style="margin-bottom:6px">
+      <input data-fi="${i}" data-k="familia" value="${esc(x.familia)}"><select data-fi="${i}" data-k="peso">${[100, 200, 300, 400, 500, 600, 700, 800, 900].map(p => `<option ${p === x.peso ? "selected" : ""}>${p}</option>`).join("")}</select>
+      <label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-fi="${i}" data-k="italico" ${x.italico ? "checked" : ""} style="width:auto"> itálico · <span class="muted">${esc(x.f.name)}</span></label></div>`).join("") : "";
+    $$("[data-fi]", el).forEach(inp => inp.onchange = inp.oninput = () => { const x = fontes[+inp.dataset.fi]; x[inp.dataset.k] = inp.type === "checkbox" ? inp.checked : inp.dataset.k === "peso" ? +inp.value : inp.value.trim(); });
+  };
+  $("#t_ok", el).onclick = async () => {
+    const tipo = $("#t_tipo", el).value, png = $("#t_png", el).files[0], ref = $("#t_ref", el).files[0], variacao = $("#t_var", el).value.trim() || "padrao";
+    const cid = loja ? loja.client_id : $("#t_cli", el).value;
+    if (!loja && !cid) return toast("Escolha o cliente.");
+    if (!png) return toast("Suba o PNG da arte.");
+    const b = $("#t_ok", el), st = t => { $("#t_st", el).textContent = t; }; b.disabled = true;
+    try {
+      // loja da esteira ligada ao cliente (cria se ainda não existe)
+      let nomeLoja = loja?.nome || S.lojas.find(l => l.client_id === cid)?.nome;
+      if (!nomeLoja) {
+        nomeLoja = S.clients.find(c => c.id === cid).name;
+        ok(await sb.from("esteira_lojas").upsert({ nome: nomeLoja, client_id: cid }, { onConflict: "nome" }));
+      }
+      const pasta = `camadas/${safeKey(nomeLoja)}`, sufixo = `${safeKey(ARTES[tipo].arte + " " + variacao).replace(/\s+/g, "_")}-${Date.now().toString(36)}`;
+      st("Enviando o PNG…");
+      const camada_path = `${pasta}/${sufixo}.png`;
+      ok(await sb.storage.from("esteira").upload(camada_path, png, { upsert: true, contentType: "image/png" }));
+      const im = await R.loadImage(URL.createObjectURL(png)), largura = im.naturalWidth, altura = im.naturalHeight;
+      let ref_path = null;
+      if (ref) { st("Enviando o print…"); ref_path = `refs/${safeKey(nomeLoja)}/${sufixo}.${(ref.name.split(".").pop() || "png").toLowerCase()}`; ok(await sb.storage.from("esteira").upload(ref_path, ref, { upsert: true, contentType: ref.type || "image/png" })); }
+      if (fontes.length) {
+        st("Enviando as fontes…");
+        const man = S.cfg.fontes || { arquivos: [] }; man.arquivos = man.arquivos || [];
+        for (const x of fontes) {
+          const arquivo = `fontes/${safeKey(x.f.name)}`;
+          ok(await sb.storage.from("esteira").upload(arquivo, x.f, { upsert: true, contentType: "font/" + (x.f.name.split(".").pop() || "ttf").toLowerCase() }));
+          const a = { familia: x.familia, peso: x.peso, italico: !!x.italico, variavel: false, arquivo };
+          man.arquivos = man.arquivos.filter(o => o.arquivo !== arquivo).concat(a);
+          try { await registrarFonte(a); } catch (e) { console.warn(e); }
+        }
+        ok(await sb.from("esteira_config").update({ data: { ...S.cfg, fontes: man } }).eq("id", 1)); S.cfg.fontes = man;
+      }
+      st("Gravando o template…");
+      const temFoto = ["anuncio", "vendido", "imovel", "site"].includes(tipo);
+      const row = { loja: nomeLoja, arte: ARTES[tipo].arte, variacao, tipo, largura, altura, camada_path, foto: temFoto ? { top: 0, left: 0, width: largura, height: altura } : null,
+        render: ref_path ? { ref_path } : {}, caixas: caixasIniciais(tipo, largura, fontes[0]?.familia || "Poppins"), liberado: true, bloqueio: null, ajustado: true, updated_at: new Date().toISOString() };
+      const t = ok(await sb.from("esteira_templates").upsert(row, { onConflict: "loja,arte,variacao" }).select().single());
+      await loadBase(); blobCache.delete(camada_path); imgCache.delete(camada_path);
+      toast("Template criado. Agora posicione os textos e a área da foto.", 5000); fechar();
+      location.hash = (tipo === "cta" ? "lojas" : "ajustar/" + t.id);
+      if (tipo === "cta") viewLojas();
+    } catch (e) { erro(e); b.disabled = false; st(""); }
+  };
 }
 async function importar(files) {
   if (!files || !files.length) return toast("Escolha a pasta esteira-2l.");
@@ -788,10 +1043,10 @@ async function importar(files) {
   viewLojas();
 }
 
-// ---------------- AJUSTAR TEMPLATE (calibrar com a arte do Canva por cima) ----------------
+// ---------------- AJUSTAR TEXTOS DO TEMPLATE (com o print da arte pronta por cima) ----------------
 async function viewAjustar(id) {
   const t0 = S.tpls.find(t => t.id === id); if (!t0) return viewLojas();
-  const tpl = JSON.parse(JSON.stringify(t0));
+  const tpl = JSON.parse(JSON.stringify(t0)); tpl.caixas = tpl.caixas || [];
   await fontsReady();
   const exemplo = { marca: "VOLKSWAGEN", modelo: "SAVEIRO", versao: "ROBUST 1.6", ano: "2022/2023", km: "42000", valor: "66900", cambio: "Manual", motor: "1.6", combustivel: "Flex", detalhes: "Completo",
     comunicado: "Informamos aos nossos clientes que, nesta sexta-feira (20/11), nossa loja estará fechada. Retornamos no sábado.",
@@ -799,54 +1054,131 @@ async function viewAjustar(id) {
   const textos = {};
   for (const cx of tpl.caixas) if (cx.exemplo && !cx.trechos) textos[cx.id] = String(cx.exemplo).replace(/\\n/g, "\n");
   let ref = null, sel = 0, opac = 0.5;
-  $("#main").innerHTML = `<a href="#lojas" class="muted small">← Lojas</a><h1>Ajustar: ${esc(tpl.loja)} — ${esc(tpl.arte)}</h1>
-    <p class="sub">Para deixar idêntico ao Canva: baixe a arte do Canva preenchida (PNG) e coloque por cima. Mova os textos até coincidirem. ${S.admin ? "" : "(só admin salva)"}</p>
+  $("#main").innerHTML = `<a href="#lojas" class="muted small">← Lojas</a><h1>Ajustar textos: ${esc(lojaLabel(tpl.loja))} · ${esc(nomeArte(tpl))}</h1>
+    <p class="sub">Coloque o print da arte pronta por cima e arraste cada texto até ficar no lugar. Clique num texto da arte para escolher qual mexer. ${S.admin ? "" : "(só administrador salva)"}</p>
     <div class="editor"><div class="stage"><canvas id="cv"></canvas>
-      <div class="row small" style="margin-top:8px"><label class="btn small ghost">Arte do Canva por cima<input type="file" id="ref" accept="image/*" hidden></label>
-      <span class="muted">Transparência</span><input type="range" id="op" min="0" max="1" step="0.05" value="0.5" class="grow"></div></div>
-      <div><div class="card" style="margin-bottom:12px"><label class="f">Caixa de texto</label><select id="cxs">${tpl.caixas.map((c, i) => `<option value="${i}">${esc(c.campo)}</option>`).join("")}</select>
-        <div class="grid3" style="margin-top:10px" id="props"></div>
-        <p class="small muted">Setas do teclado movem a caixa selecionada (Shift = 10px).</p></div>
-        <div class="card" style="margin-bottom:12px"><label class="f">Texto de teste desta caixa</label><input id="txt"></div>
+      <div class="row small" style="margin-top:8px"><label class="btn small ghost">${tpl.render?.ref_path ? "Trocar print" : "Print da arte por cima"}<input type="file" id="ref" accept="image/*" hidden></label>
+      <span class="muted">Transparência do print</span><input type="range" id="op" min="0" max="1" step="0.05" value="0.5" class="grow"></div></div>
+      <div>
+        <div class="card" style="margin-bottom:12px"><div class="row" style="margin-bottom:8px"><label class="f grow" style="margin:0">Texto da arte</label>
+          ${S.admin ? `<button class="btn small ghost" id="add">+ Texto</button><button class="btn small ghost" id="del">Tirar</button>` : ""}</div>
+          <select id="cxs"></select>
+          <div id="props" style="margin-top:10px"></div>
+          <p class="small muted">Setas do teclado também movem o texto (Shift = 10px).</p></div>
+        ${tpl.foto ? `<div class="card" style="margin-bottom:12px"><label class="f">Área da foto do carro (onde a foto aparece)</label><div class="grid2" id="fotoA"></div></div>` : ""}
         ${S.admin ? `<div class="row"><button class="btn primary" id="salvar">Salvar ajustes</button><button class="btn ghost" id="desf">Desfazer tudo</button></div>` : ""}</div></div>`;
   const cv = $("#cv");
   const camada = await storageImg(tpl.camada_path);
-  const PROPS = [["top", "Topo"], ["left", "Esquerda"], ["largura", "Largura"], ["tamanho", "Tamanho"], ["espacamento", "Espaçamento"], ["entrelinha", "Entrelinha"]];
+  if (tpl.render?.ref_path) try { ref = await storageImg(tpl.render.ref_path); } catch (e) {}
+  const NUM = [["top", "Topo"], ["left", "Esquerda"], ["largura", "Largura"], ["tamanho", "Tamanho"], ["espacamento", "Espaçamento"], ["entrelinha", "Entrelinha"]];
+  const caixaAt = () => tpl.caixas[sel];
   async function draw() {
     await R.ensureFonts(tpl);
     const tx = { ...R.textosPadrao(tpl, exemplo), ...textos };
+    // área da foto em cinza para enxergar onde ela entra
     R.renderArte({ tpl, camada, foto: null, textos: tx, canvas: cv });
     const ctx = cv.getContext("2d");
+    if (tpl.foto) { ctx.save(); ctx.globalCompositeOperation = "destination-over"; ctx.fillStyle = "#9a9a94"; ctx.fillRect(tpl.foto.left, tpl.foto.top, tpl.foto.width, tpl.foto.height); ctx.restore(); }
     if (ref) { ctx.globalAlpha = opac; ctx.drawImage(ref, 0, 0, cv.width, cv.height); ctx.globalAlpha = 1; }
-    const c = tpl.caixas[sel]; ctx.strokeStyle = "#ff00aa"; ctx.lineWidth = 2; ctx.setLineDash([8, 6]);
+    const c = caixaAt(); if (!c) return;
+    ctx.strokeStyle = "#ff00aa"; ctx.lineWidth = 3; ctx.setLineDash([10, 6]);
     ctx.strokeRect(c.left, c.top, c.largura, c.tamanho * (c.entrelinha || 1.2)); ctx.setLineDash([]);
   }
+  function lista() {
+    $("#cxs").innerHTML = tpl.caixas.length ? tpl.caixas.map((c, i) => `<option value="${i}" ${i === sel ? "selected" : ""}>${esc(c.campo || "Texto " + (i + 1))}</option>`).join("") : `<option>Nenhum texto. Clique em + Texto.</option>`;
+  }
   function props() {
-    const c = tpl.caixas[sel];
-    $("#props").innerHTML = PROPS.map(([k, l]) => `<div><label class="f">${l}</label><input type="number" step="${k === "entrelinha" || k === "espacamento" ? 0.01 : 0.5}" data-p="${k}" value="${c[k] ?? 0}"></div>`).join("");
+    const c = caixaAt();
+    if (!c) { $("#props").innerHTML = ""; return; }
+    const fams = familiasFonte(); if (!fams.includes(c.fonte)) fams.unshift(c.fonte);
+    $("#props").innerHTML = `
+      <div style="margin-bottom:8px"><label class="f">O que vai escrito (use os campos: {marca} {modelo} {versao} {ano} {km} {valor} {valor_cent} {motor} {cambio} {detalhes} {comunicado})</label>
+        <input data-s="modelo" value="${esc(c.trechos ? c.trechos.map(r => r.modelo).join(" | ") : c.modelo || "")}" ${c.trechos ? "disabled title='Texto com estilos misturados: ajuste pelo pacote'" : ""}></div>
+      <div class="grid3" style="margin-bottom:8px">
+        <div><label class="f">Fonte</label><select data-s="fonte">${fams.map(f => `<option ${f === c.fonte ? "selected" : ""}>${esc(f)}</option>`).join("")}</select></div>
+        <div><label class="f">Peso</label><select data-s="peso">${[100, 200, 300, 400, 500, 600, 700, 800, 900].map(p => `<option ${p === +c.peso ? "selected" : ""}>${p}</option>`).join("")}</select></div>
+        <div><label class="f">Cor</label><input type="color" data-s="cor" value="${esc(/^#[0-9a-f]{6}$/i.test(c.cor || "") ? c.cor : "#000000")}" style="height:38px;padding:2px"></div>
+        <div><label class="f">Alinhamento</label><select data-s="alinhamento">${[["start", "Esquerda"], ["center", "Centro"], ["end", "Direita"]].map(([k, l]) => `<option value="${k}" ${(c.alinhamento || "start") === k || (k === "end" && c.alinhamento === "right") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div><label class="f">Maiúsculas</label><select data-s="maiusculas"><option value="1" ${c.maiusculas ? "selected" : ""}>Sim</option><option value="0" ${!c.maiusculas ? "selected" : ""}>Não</option></select></div>
+        <div><label class="f">Itálico</label><select data-s="italico"><option value="0" ${!c.italico ? "selected" : ""}>Não</option><option value="1" ${c.italico ? "selected" : ""}>Sim</option></select></div>
+      </div>
+      <div class="grid3">${NUM.map(([k, l]) => `<div><label class="f">${l}</label><input type="number" step="${k === "entrelinha" || k === "espacamento" ? 0.01 : 1}" data-p="${k}" value="${Math.round((c[k] ?? 0) * 100) / 100}"></div>`).join("")}</div>
+      <div style="margin-top:8px"><label class="f">Texto de teste (só para ver aqui)</label><input id="txt"></div>`;
     $$("#props [data-p]").forEach(el => el.oninput = () => { c[el.dataset.p] = parseFloat(el.value) || 0; if (el.dataset.p === "tamanho" && c.trechos) c.trechos.forEach(r => r.tamanho = c.tamanho); draw(); });
+    $$("#props [data-s]").forEach(el => el.oninput = el.onchange = () => {
+      const k = el.dataset.s, v = el.value;
+      if (k === "modelo") { c.modelo = v; delete textos[c.id]; }
+      else if (k === "maiusculas" || k === "italico") c[k] = v === "1";
+      else if (k === "peso") c.peso = +v;
+      else c[k] = v;
+      if (c.trechos && ["fonte", "peso", "cor", "italico"].includes(k)) c.trechos.forEach(r => r[k] = c[k]);
+      draw();
+    });
     const v = { ...R.textosPadrao(tpl, exemplo), ...textos }[c.id];
     $("#txt").value = Array.isArray(v) ? v.join("|") : v || "";
+    $("#txt").oninput = e => { textos[c.id] = c.trechos ? e.target.value.split("|") : e.target.value; draw(); };
   }
+  function fotoProps() {
+    if (!tpl.foto) return;
+    $("#fotoA").innerHTML = [["top", "Topo"], ["left", "Esquerda"], ["width", "Largura"], ["height", "Altura"]].map(([k, l]) => `<div><label class="f">${l}</label><input type="number" data-fa="${k}" value="${Math.round(tpl.foto[k])}"></div>`).join("");
+    $$("#fotoA [data-fa]").forEach(el => el.oninput = () => { tpl.foto[el.dataset.fa] = parseFloat(el.value) || 0; draw(); });
+  }
+  const tudo = () => { lista(); props(); draw(); };
   $("#cxs").onchange = e => { sel = +e.target.value; props(); draw(); };
-  $("#txt").oninput = e => { const c = tpl.caixas[sel]; textos[c.id] = c.trechos ? e.target.value.split("|") : e.target.value; draw(); };
   $("#op").oninput = e => { opac = +e.target.value; draw(); };
-  $("#ref").onchange = async e => { const f = e.target.files[0]; if (f) { ref = await R.loadImage(URL.createObjectURL(f)); draw(); } };
+  $("#ref").onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    ref = await R.loadImage(URL.createObjectURL(f)); draw();
+    if (S.admin) try {   // guarda o print junto do template para a próxima vez
+      const p = `refs/${safeKey(tpl.loja)}/${safeKey(tpl.arte + " " + tpl.variacao).replace(/\s+/g, "_")}-${Date.now().toString(36)}.${(f.name.split(".").pop() || "png").toLowerCase()}`;
+      ok(await sb.storage.from("esteira").upload(p, f, { upsert: true, contentType: f.type || "image/png" })); tpl.render = { ...(tpl.render || {}), ref_path: p };
+    } catch (err) { console.warn(err); }
+  };
+  if (S.admin) {
+    $("#add").onclick = () => {
+      const op = abrirModal(`<h2>Novo texto</h2><p class="sub">Escolha o que vai escrito. Depois é só arrastar para o lugar.</p>
+        <div class="grid2">${CAMPOS_PRONTOS.map(([n, md], i) => `<button class="btn ghost" data-nc="${i}" style="justify-content:flex-start">${esc(n)} <span class="small muted">${esc(md)}</span></button>`).join("")}</div>`);
+      $$("[data-nc]", op.el).forEach(b => b.onclick = () => {
+        const [n, md] = CAMPOS_PRONTOS[+b.dataset.nc], base = caixaAt();
+        tpl.caixas.push(caixaPadrao(tpl.caixas.length, tpl.largura, base?.fonte || familiasFonte()[0], n, md, base ? { cor: base.cor, fonte: base.fonte, top: Math.min(tpl.altura - 80, base.top + 90) } : {}));
+        sel = tpl.caixas.length - 1; op.fechar(); tudo();
+      });
+    };
+    $("#del").onclick = () => { if (!caixaAt() || !confirm(`Tirar o texto "${caixaAt().campo}" desta arte?`)) return; tpl.caixas.splice(sel, 1); sel = Math.max(0, sel - 1); tudo(); };
+  }
+  // arrastar o texto (ou escolher clicando nele)
+  let drag = null;
+  const ponto = e => { const r = cv.getBoundingClientRect(), k = cv.width / r.width; return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k }; };
+  const dentro = (c, p) => p.x >= c.left && p.x <= c.left + c.largura && p.y >= c.top - 10 && p.y <= c.top + c.tamanho * (c.entrelinha || 1.2) * 1.5;
+  cv.onpointerdown = e => {
+    const p = ponto(e);
+    const hit = tpl.caixas.findIndex(c => dentro(c, p));
+    if (hit >= 0 && hit !== sel) { sel = hit; lista(); props(); draw(); }
+    const c = caixaAt(); if (!c || !dentro(c, p)) return;
+    drag = { x: p.x, y: p.y, top: c.top, left: c.left }; cv.setPointerCapture(e.pointerId); cv.classList.add("drag");
+  };
+  cv.onpointermove = e => {
+    if (!drag) return; const p = ponto(e), c = caixaAt();
+    c.left = Math.round(drag.left + p.x - drag.x); c.top = Math.round(drag.top + p.y - drag.y); draw();
+  };
+  cv.onpointerup = cv.onpointercancel = () => { if (drag) { drag = null; cv.classList.remove("drag"); props(); } };
   const onKey = e => {
-    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key) || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
-    e.preventDefault(); const c = tpl.caixas[sel], d = e.shiftKey ? 10 : 1;
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key) || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || !caixaAt()) return;
+    e.preventDefault(); const c = caixaAt(), d = e.shiftKey ? 10 : 1;
     if (e.key === "ArrowUp") c.top -= d; if (e.key === "ArrowDown") c.top += d; if (e.key === "ArrowLeft") c.left -= d; if (e.key === "ArrowRight") c.left += d;
     props(); draw();
   };
   document.addEventListener("keydown", onKey); leaveHooks.push(() => document.removeEventListener("keydown", onKey));
   if (S.admin) {
     $("#salvar").onclick = async () => {
-      try { ok(await sb.from("esteira_templates").update({ caixas: tpl.caixas, ajustado: true, updated_at: new Date().toISOString() }).eq("id", id)); t0.caixas = tpl.caixas; t0.ajustado = true; toast("Ajustes salvos ✓"); }
-      catch (e) { erro(e); }
+      try {
+        const upd = { caixas: tpl.caixas, foto: tpl.foto, render: tpl.render || {}, ajustado: true, updated_at: new Date().toISOString() };
+        ok(await sb.from("esteira_templates").update(upd).eq("id", id)); Object.assign(t0, upd); toast("Ajustes salvos ✓");
+      } catch (e) { erro(e); }
     };
     $("#desf").onclick = () => viewAjustar(id);
   }
-  props(); draw();
+  fotoProps(); tudo();
 }
 
 boot();
