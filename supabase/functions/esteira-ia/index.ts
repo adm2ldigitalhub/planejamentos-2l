@@ -116,12 +116,26 @@ ${infoLoja(body.loja)}
     if (acao === "comunicado") {
       const lojas = (body.lojas || []) as any[];
       const system = `${REGRAS}
-Tarefa: escrever o texto de um comunicado curto (2 a 4 frases, cabe num card de Instagram) para cada loja da lista, sobre o mesmo assunto.
-Cada loja precisa de um texto diferente (outras palavras e outra ordem), mas com as mesmas informações. Não use emojis nem hashtags. Não invente horários ou informações que não estão no assunto.`;
-      const user = `<assunto>\n${body.assunto}\n</assunto>\n<lojas>\n${lojas.map((l) => `id=${l.id} | nome=${l.nome}`).join("\n")}\n</lojas>`;
-      const schema = { type: "object", additionalProperties: false, properties: { textos: { type: "array", items: { type: "object", additionalProperties: false, properties: { id: S(), texto: S() }, required: ["id", "texto"] } } }, required: ["textos"] };
+Tarefa: para cada loja da lista, sobre o mesmo assunto, escreva:
+1. "texto": o texto do card do comunicado (2 a 4 frases, cabe numa arte de Instagram). Sem emojis nem hashtags.
+2. "legenda": a legenda do post desse comunicado. Repete a informação principal com outras palavras, no tom da loja, usando os emojis preferidos dela (ou 📍 e 📲 se não houver), o slogan e o CTA próprio quando existirem, e termina com loja, endereço e WhatsApp do cadastro. Sem preço, condições de pagamento ou regras de anúncio de veículo. Blocos separados por linha em branco.
+Cada loja precisa de texto e legenda diferentes (outras palavras e outra ordem), mas com as mesmas informações. Não invente horários, datas ou informações que não estão no assunto, nem contatos que não estão no cadastro.`;
+      const user = `<assunto>\n${body.assunto}\n</assunto>\n<lojas>\n${lojas.map((l) => `<loja id="${l.id}">\n${infoLoja(l)}\n</loja>`).join("\n")}\n</lojas>`;
+      const schema = { type: "object", additionalProperties: false, properties: { textos: { type: "array", items: { type: "object", additionalProperties: false, properties: { id: S(), texto: S(), legenda: S() }, required: ["id", "texto", "legenda"] } } }, required: ["textos"] };
       const out = await perguntar(system, user, schema);
-      return json({ textos: Object.fromEntries((out.textos || []).map((t: any) => [t.id, t.texto])) });
+      return json({ textos: Object.fromEntries((out.textos || []).map((t: any) => [t.id, t.texto])), legendas: Object.fromEntries((out.textos || []).map((t: any) => [t.id, t.legenda])) });
+    }
+
+    // legenda de um comunicado já criado (botão "Gerar com IA" na tela do comunicado)
+    if (acao === "comunicado_legenda") {
+      const system = `${REGRAS}
+Tarefa: escrever a legenda do post de um comunicado desta loja. Repita a informação principal do comunicado com outras palavras, no tom da loja, usando os emojis preferidos dela (ou 📍 e 📲 se não houver), o slogan e o CTA próprio quando existirem, e termine com loja, endereço e WhatsApp do cadastro. Sem preço, condições de pagamento ou regras de anúncio de veículo. Blocos separados por linha em branco. Não invente nada que não esteja no comunicado ou no cadastro.
+<dados_da_loja>
+${infoLoja(body.loja)}
+</dados_da_loja>`;
+      const schema = { type: "object", additionalProperties: false, properties: { legenda: S("legenda pronta para postar") }, required: ["legenda"] };
+      const out = await perguntar(system, `<comunicado>\n${body.texto || body.assunto || ""}\n</comunicado>`, schema);
+      return json(out);
     }
 
     return json({ error: "ação desconhecida" }, 400);

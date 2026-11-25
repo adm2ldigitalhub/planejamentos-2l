@@ -597,7 +597,7 @@ async function viewPost(id) {
            })()}</div>`}
         </div>
         <div class="card" style="margin-bottom:12px"><h2>Textos da capa</h2><p class="small muted" style="margin-top:-6px">Saem dos dados. Se mudar algum aqui, ele fica fixo (↺ volta ao automático).</p><div id="boxes"></div></div>
-        ${comunicado ? "" : `<div class="card" style="margin-bottom:12px"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Legenda</h2>
+        ${`<div class="card" style="margin-bottom:12px"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Legenda</h2>
           <button class="btn small ghost" id="leg">Gerar com IA</button></div><div id="falta"></div><textarea id="legenda" rows="12">${esc(P.legenda || "")}</textarea></div>`}
       </div>
     </div>
@@ -769,6 +769,14 @@ async function viewPost(id) {
   });
   $("#leg") && ($("#leg").onclick = async () => {
     const btn = $("#leg"), txt = btn.textContent; btn.disabled = true; btn.textContent = "Escrevendo…";
+    if (comunicado) {   // comunicado: a legenda sai do texto do card e do cadastro da loja
+      try {
+        await salvar();
+        const l = lojaObj(P.loja), r = await fn("esteira-ia", { acao: "comunicado_legenda", texto: P.dados?.comunicado || "", assunto: P.mensagem || "", loja: { nome: lojaLabel(P.loja), dados: l.dados || {} } });
+        P.legenda = r.legenda || ""; $("#legenda").value = P.legenda; mudou();
+      } catch (e) { erro(e); }
+      btn.disabled = false; btn.textContent = txt; return;
+    }
     try { await salvar(); const upd = await processarPostIA({ ...P }); P.legenda = upd.legenda; P.dados = { ...(P.dados || {}), faltando: upd.dados.faltando }; $("#legenda").value = P.legenda || ""; pintarFalta(); mudou(); }
     catch (e) { erro(e); }
     btn.disabled = false; btn.textContent = txt;
@@ -862,16 +870,16 @@ async function viewComunicado() {
     if (!assunto || !sel.length) return toast("Escreva o assunto e marque as lojas.");
     $("#gerar").disabled = true;
     try {
-      let textos = {};
+      let textos = {}, legendas = {};
       if (!$("#mesmo").checked) {
         $("#cst").textContent = "A IA está escrevendo os textos…";
         try {
           const r = await fn("esteira-ia", { acao: "comunicado", assunto, lojas: sel.map(n => ({ id: n, nome: lojaLabel(n), dados: lojaObj(n).dados || {} })) });
-          textos = r.textos || {};
+          textos = r.textos || {}; legendas = r.legendas || {};
         } catch (e) { toast(e.message + " Usei o mesmo texto para todas.", 6000); }
       }
       const lote = ok(await sb.from("esteira_lotes").insert({ nome: "Comunicado: " + assunto.slice(0, 40) }).select().single());
-      ok(await sb.from("esteira_posts").insert(sel.map(n => ({ lote_id: lote.id, loja: n, tipo: "comunicado", status: "novo", mensagem: assunto, dados: { comunicado: textos[n] || assunto } }))));
+      ok(await sb.from("esteira_posts").insert(sel.map(n => ({ lote_id: lote.id, loja: n, tipo: "comunicado", status: "novo", mensagem: assunto, dados: { comunicado: textos[n] || assunto }, legenda: legendas[n] || "" }))));
       toast("Comunicados criados!"); memo("aba", "comunicados"); location.hash = "fila/" + lote.id;
     } catch (e) { erro(e); $("#gerar").disabled = false; }
   };
