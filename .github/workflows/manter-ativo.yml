@@ -18,9 +18,22 @@ jobs:
         env:
           URL: ${{ secrets.SUPABASE_URL }}
           KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        # Tenta até 5 vezes. Se o DNS do GitHub não achar o endereço, pergunta o IP ao DNS da Cloudflare (1.1.1.1).
         run: |
-          curl -fsS "$URL/rest/v1/settings?select=id&limit=1" -H "apikey: $KEY" -H "Authorization: Bearer $KEY" > /dev/null
-          echo "Supabase acessado."
+          URL=$(printf '%s' "$URL" | tr -d '[:space:]'); KEY=$(printf '%s' "$KEY" | tr -d '[:space:]')
+          HOST=$(printf '%s' "$URL" | sed -E 's#^https?://([^/]+).*#\1#')
+          PING="$URL/rest/v1/settings?select=id&limit=1"
+          for i in 1 2 3 4 5; do
+            if curl -fsS --max-time 20 "$PING" -H "apikey: $KEY" -H "Authorization: Bearer $KEY" > /dev/null; then
+              echo "Supabase acessado."; exit 0
+            fi
+            IP=$(dig +short @1.1.1.1 "$HOST" A | grep -E '^[0-9.]+$' | head -n 1)
+            if [ -n "$IP" ] && curl -fsS --max-time 20 --resolve "$HOST:443:$IP" "$PING" -H "apikey: $KEY" -H "Authorization: Bearer $KEY" > /dev/null; then
+              echo "Supabase acessado (pelo DNS 1.1.1.1)."; exit 0
+            fi
+            echo "Tentativa $i falhou, tentando de novo em 30 s..."; sleep 30
+          done
+          echo "Não consegui acessar o Supabase."; exit 1
 
       # O GitHub desliga tarefas agendadas de repositórios sem nenhuma alteração há 60 dias.
       # Uma vez por mês registramos a data num arquivo para isso não acontecer.
