@@ -58,10 +58,19 @@ async function perguntar(system: string, user: string, schema: Record<string, un
   return JSON.parse(txt);
 }
 
+// cadastro da loja (Templates > abrir a loja) que entra na legenda
 function infoLoja(loja: any) {
   const d = loja?.dados || {};
-  return [`Loja: ${loja?.nome || ""}`, d.endereco && `Endereço: ${d.endereco}`, d.whatsapp && `WhatsApp: ${d.whatsapp}`, d.site && `Site/Instagram: ${d.site}`]
+  return [`Nome da loja: ${loja?.nome || ""}`, d.endereco && `Endereço: ${d.endereco}`, d.whatsapp && `WhatsApp: ${d.whatsapp}`,
+    d.site && `Site/Instagram: ${d.site}`, d.slogan && `Slogan: ${d.slogan}`, d.emojis && `Emojis preferidos: ${d.emojis}`,
+    d.cta && `CTA próprio da loja: ${d.cta}`, d.observacoes && `Observações e condições da loja: ${d.observacoes}`]
     .filter(Boolean).join("\n");
+}
+// instruções gerais da agência (Templates > Instruções da IA), lidas do banco a cada pedido
+async function instrucoesAgencia() {
+  const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
+  const { data } = await sb.from("esteira_config").select("data").eq("id", 1).maybeSingle();
+  return String(data?.data?.instrucoes_legenda || "").trim();
 }
 
 // só quem tem a permissão "esteira" no 2L Core (Ajustes > Acessos) usa esta função
@@ -83,14 +92,23 @@ Deno.serve(async (req) => {
     const acao = body.acao;
 
     if (acao === "anuncio" || acao === "vendido" || acao === "imovel") {
-      const imovel = acao === "imovel";
-      const modelo = (body.loja?.legenda_modelo || "").trim();
+      const imovel = acao === "imovel", vendido = acao === "vendido";
+      const modelo = (body.loja?.legenda_modelo || "").trim(), agencia = await instrucoesAgencia();
       const system = `${REGRAS}
-Tarefa: a partir da mensagem do lojista, extraia os dados do ${imovel ? "imóvel" : "veículo"} e escreva a legenda do post de ${acao === "vendido" ? "VENDIDO (entrega do carro ao cliente)" : "anúncio"} para Instagram/Facebook.
-${modelo ? `A legenda deve seguir EXATAMENTE a estrutura, o tom, os emojis e as linhas fixas deste modelo real da loja (troque só o que é do ${imovel ? "imóvel" : "carro"}; linhas de destaque só com o que a mensagem trouxe; se um dado não existir, tire a linha):\n<modelo_de_legenda>\n${modelo}\n</modelo_de_legenda>` :
-        "Não há modelo de legenda cadastrado: escreva uma legenda curta e direta, com título em maiúsculas, valor, destaques informados e chamada para o WhatsApp."}
-${infoLoja(body.loja)}`;
-      const schema = { type: "object", additionalProperties: false, properties: { dados: imovel ? IMOVEL : CARRO, legenda: S("legenda pronta para postar") }, required: ["dados", "legenda"] };
+${agencia ? `<instrucoes_da_agencia>\n${agencia}\n</instrucoes_da_agencia>
+Como usar as instruções acima nesta plataforma:
+- A loja já está cadastrada (dados abaixo): não peça cadastro nem faça perguntas.
+- Devolva a legenda pronta no campo "legenda", só o texto que vai ser postado: sem bloco de código, sem comentários e sem o aviso de informações ausentes.
+- As informações comerciais ausentes vão no campo "faltando" (o aviso interno), uma por item. Lista vazia se não faltar nada.
+${vendido ? "- Este post é de VENDIDO (entrega do veículo ao cliente), não é anúncio: não use preço, pagamento, restrições comerciais nem opcionais. Escreva uma legenda curta de parabéns e agradecimento, com loja, WhatsApp e CTA, no tom da loja.\n" : ""}` : ""}
+Tarefa: a partir da mensagem do lojista, extraia os dados do ${imovel ? "imóvel" : "veículo"} e escreva a legenda do post de ${vendido ? "VENDIDO (entrega do veículo ao cliente)" : "anúncio"} para Instagram/Facebook.
+${modelo ? `Modelo e exemplos reais de legenda desta loja. Siga a estrutura, o tom, os emojis e as linhas fixas da loja (troque só o que é do ${imovel ? "imóvel" : "veículo"}; se um dado não existir, tire a linha). Varie o texto comercial e o CTA em relação aos exemplos:\n<modelo_de_legenda>\n${modelo}\n</modelo_de_legenda>` :
+        agencia ? "Esta loja não tem modelo de legenda: use o modelo padrão das instruções da agência." : "Não há modelo de legenda cadastrado: escreva uma legenda curta e direta, com título em maiúsculas, valor, destaques informados e chamada para o WhatsApp."}
+<dados_da_loja>
+${infoLoja(body.loja)}
+</dados_da_loja>`;
+      const schema = { type: "object", additionalProperties: false, properties: { dados: imovel ? IMOVEL : CARRO, legenda: S("legenda pronta para postar"),
+        faltando: { type: "array", items: { type: "string" }, description: "informações comerciais que faltaram na mensagem (aviso interno, não vai na legenda)" } }, required: ["dados", "legenda", "faltando"] };
       const out = await perguntar(system, `<mensagem_do_lojista>\n${body.mensagem || "(sem mensagem)"}\n</mensagem_do_lojista>`, schema);
       return json(out);
     }

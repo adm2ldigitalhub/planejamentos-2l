@@ -532,6 +532,7 @@ async function processarPostIA(p) {
   const r = await fn("esteira-ia", { acao: p.tipo === "vendido" ? "vendido" : p.tipo === "imovel" ? "imovel" : "anuncio",
     mensagem: p.mensagem, loja: { nome: lojaLabel(p.loja), legenda_modelo: loja.legenda_modelo || "", dados: loja.dados || {} } });
   const dados = { ...p.dados, ...(r.dados || {}), tipo: p.tipo };
+  if (Array.isArray(r.faltando)) dados.faltando = r.faltando.filter(Boolean);   // aviso interno, não vai na legenda
   const upd = { dados, legenda: r.legenda || p.legenda || "", erro: null };
   ok(await sb.from("esteira_posts").update(upd).eq("id", p.id));
   return upd;
@@ -597,7 +598,7 @@ async function viewPost(id) {
         </div>
         <div class="card" style="margin-bottom:12px"><h2>Textos da capa</h2><p class="small muted" style="margin-top:-6px">Saem dos dados. Se mudar algum aqui, ele fica fixo (↺ volta ao automático).</p><div id="boxes"></div></div>
         ${comunicado ? "" : `<div class="card" style="margin-bottom:12px"><div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Legenda</h2>
-          <button class="btn small ghost" id="leg">Gerar com IA</button></div><textarea id="legenda" rows="12">${esc(P.legenda || "")}</textarea></div>`}
+          <button class="btn small ghost" id="leg">Gerar com IA</button></div><div id="falta"></div><textarea id="legenda" rows="12">${esc(P.legenda || "")}</textarea></div>`}
       </div>
     </div>
     <div class="navbar">
@@ -757,7 +758,7 @@ async function viewPost(id) {
   // ler a mensagem de novo: com IA quando estiver ligada; sem ela, a leitura simples
   $("#reler") && ($("#reler").onclick = async () => {
     const b = $("#reler"), txt = b.textContent; b.disabled = true; b.textContent = "Lendo…";
-    try { await salvar(); const upd = await processarPostIA({ ...P }); P.dados = upd.dados; P.legenda = P.legenda || upd.legenda; }
+    try { await salvar(); const upd = await processarPostIA({ ...P }); P.dados = upd.dados; P.legenda = P.legenda || upd.legenda; pintarFalta(); }
     catch (e) {
       if (!/não foi configurad/.test(e.message)) toast("IA: " + e.message, 5000);
       const d = parseMensagem(P.mensagem); P.dados = { ...(P.dados || {}), ...Object.fromEntries(Object.entries(d).filter(([, v]) => v)) };
@@ -768,7 +769,7 @@ async function viewPost(id) {
   });
   $("#leg") && ($("#leg").onclick = async () => {
     const btn = $("#leg"), txt = btn.textContent; btn.disabled = true; btn.textContent = "Escrevendo…";
-    try { await salvar(); const upd = await processarPostIA({ ...P }); P.legenda = upd.legenda; $("#legenda").value = P.legenda || ""; mudou(); }
+    try { await salvar(); const upd = await processarPostIA({ ...P }); P.legenda = upd.legenda; P.dados = { ...(P.dados || {}), faltando: upd.dados.faltando }; $("#legenda").value = P.legenda || ""; pintarFalta(); mudou(); }
     catch (e) { erro(e); }
     btn.disabled = false; btn.textContent = txt;
   });
@@ -790,6 +791,13 @@ async function viewPost(id) {
     } catch (e) { erro(e); }
     b.disabled = false; bar.classList.add("hidden");
   };
+
+  // o que a IA viu que faltou na mensagem (aviso para a equipe, fora da legenda)
+  function pintarFalta() {
+    const f = P.dados?.faltando || [], box = $("#falta"); if (!box) return;
+    box.innerHTML = f.length ? `<div class="lockbar" style="margin-bottom:8px">⚠️ Faltou na mensagem do lojista: <b>${f.map(esc).join(", ")}</b>. Peça para a loja ou siga sem.</div>` : "";
+  }
+  pintarFalta();
 
   // navegação entre posts
   const ir = pid => { flush(); location.hash = "post/" + pid; };
@@ -900,7 +908,7 @@ async function viewLojas() {
   const tpLoja = n => S.tpls.filter(t => t.loja === n && t.tipo !== "fundo");
   const lista = [...S.lojas].sort((a, b) => lojaLabel(a.nome).localeCompare(lojaLabel(b.nome), "pt-BR"));
   const semCli = lista.filter(l => !l.client_id).length;
-  m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Templates</h1>${S.admin ? `<button class="btn primary" id="novoTpl">+ Template</button>` : ""}</div>
+  m.innerHTML = `<div class="row" style="margin-bottom:4px"><h1 class="grow" style="margin:0">Templates</h1>${S.admin ? `<button class="btn ghost" id="instr" title="As regras de legenda que valem para todas as lojas">Instruções da IA</button><button class="btn primary" id="novoTpl">+ Template</button>` : ""}</div>
     <p class="sub">Cada loja é um cliente do 2L Core com os templates dele. Clique na loja para ver o Drive, o modelo de legenda e as artes.${S.admin ? "" : " Só administradores alteram esta parte."}</p>
     ${semCli && S.admin ? `<div class="lockbar">${semCli} loja(s) sem cliente ligado. Abra a loja e escolha o cliente, ou <button class="btn small ghost" id="vinc">Ligar pelo nome</button></div>` : ""}
     <div class="row" style="margin-bottom:12px"><input id="lq" class="search" placeholder="Buscar loja…"></div>
@@ -927,7 +935,23 @@ async function viewLojas() {
     $("#imp").onclick = () => importar($("#pasta").files).catch(erro);
     $("#vinc") && ($("#vinc").onclick = vincularClientes);
     $("#novoTpl").onclick = () => novoTemplate();
+    $("#instr").onclick = instrucoesIA;
   }
+}
+// regras de legenda da agência (o prompt do "Atlas"), valem para todas as lojas
+function instrucoesIA() {
+  const { el, fechar } = abrirModal(`<h2 style="margin-right:44px">Instruções da IA para as legendas</h2>
+    <p class="sub" style="margin-top:-6px">Valem para todas as lojas. O que é de cada loja (endereço, WhatsApp, slogan, emojis, CTA, modelo de legenda) fica no cadastro dela. Se a loja tiver modelo de legenda, a IA segue o modelo e usa estas regras para o resto.</p>
+    <textarea id="i_txt" rows="22" style="font-size:13px;line-height:1.5">${esc(S.cfg.instrucoes_legenda || "")}</textarea>
+    <div class="row" style="margin-top:12px"><span class="grow small muted">${(S.cfg.instrucoes_legenda || "").length} caracteres</span><button class="btn primary" id="i_ok">Salvar instruções</button></div>`);
+  $("#i_ok", el).onclick = async () => {
+    try {
+      const cfg = ok(await sb.from("esteira_config").select("data").eq("id", 1).single()).data || {};
+      cfg.instrucoes_legenda = $("#i_txt", el).value.trim();
+      ok(await sb.from("esteira_config").update({ data: cfg }).eq("id", 1));
+      S.cfg = cfg; toast("Instruções salvas ✓"); fechar();
+    } catch (e) { erro(e); }
+  };
 }
 function editarLoja(nome) {
   const l = lojaObj(nome), d = l.dados || {}, dis = S.admin ? "" : "disabled";
@@ -943,8 +967,12 @@ function editarLoja(nome) {
       <div><label class="f">WhatsApp</label><input id="e_wpp" value="${esc(d.whatsapp || "")}" ${dis}></div>
       <div><label class="f">Endereço</label><input id="e_end" value="${esc(d.endereco || "")}" ${dis}></div>
       <div><label class="f">Site / Instagram</label><input id="e_site" value="${esc(d.site || "")}" ${dis}></div>
+      <div><label class="f">Slogan (opcional)</label><input id="e_slo" value="${esc(d.slogan || "")}" ${dis}></div>
+      <div><label class="f">Emojis preferidos (opcional)</label><input id="e_emo" value="${esc(d.emojis || "")}" ${dis} placeholder="💰 💳 📍 📲"></div>
+      <div><label class="f">CTA próprio da loja (opcional)</label><input id="e_cta" value="${esc(d.cta || "")}" ${dis} placeholder="Ex.: Chama no Whats que a gente te atende!"></div>
+      <div><label class="f">Observações e condições da loja (opcional)</label><input id="e_obs" value="${esc(d.observacoes || "")}" ${dis} placeholder="Ex.: aceita troca; financia em até 60x; não cita valor"></div>
     </div>
-    <label class="f">Modelo de legenda (cole uma legenda real da loja; a IA segue o formato)</label><textarea id="e_leg" rows="7" ${dis}>${esc(l.legenda_modelo || "")}</textarea>
+    <label class="f">Modelo e exemplos de legenda da loja (cole 1 a 3 legendas reais, separadas por uma linha com ---; a IA segue o formato e varia o texto)</label><textarea id="e_leg" rows="9" ${dis}>${esc(l.legenda_modelo || "")}</textarea>
     ${S.admin ? `<div class="row" style="margin:10px 0 4px"><button class="btn primary" id="e_save">Salvar loja</button></div>` : ""}
     <div class="sec-h"><h2 class="grow">Artes</h2>${S.admin ? `<button class="btn small" id="e_novo">+ Template</button>` : ""}</div>
     ${ts.length ? `<table class="list"><thead><tr><th>Arte</th><th>Status</th><th></th></tr></thead><tbody>${ts.map(t => `<tr>
@@ -957,7 +985,8 @@ function editarLoja(nome) {
     try {
       const row = { client_id: $("#e_cli", el).value || null, drive_pasta_id: $("#e_drv", el).value.trim().replace(/^.*folders\//, "").replace(/[?#].*$/, ""),
         drive_padrao: $("#e_pad", el).value.trim(), legenda_modelo: $("#e_leg", el).value, ativo: $("#e_at", el).value === "1",
-        dados: { ...d, endereco: $("#e_end", el).value, whatsapp: $("#e_wpp", el).value, site: $("#e_site", el).value, drive_padrao_vendido: $("#e_padv", el).value.trim() }, updated_at: new Date().toISOString() };
+        dados: { ...d, endereco: $("#e_end", el).value, whatsapp: $("#e_wpp", el).value, site: $("#e_site", el).value,
+          slogan: $("#e_slo", el).value.trim(), emojis: $("#e_emo", el).value.trim(), cta: $("#e_cta", el).value.trim(), observacoes: $("#e_obs", el).value.trim(), drive_padrao_vendido: $("#e_padv", el).value.trim() }, updated_at: new Date().toISOString() };
       ok(await sb.from("esteira_lojas").update(row).eq("nome", nome));
       Object.assign(l, row); toast("Loja salva ✓"); fechar(); viewLojas();
     } catch (e) { erro(e); }
