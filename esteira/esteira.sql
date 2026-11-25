@@ -6,7 +6,7 @@ create table if not exists esteira_lojas (
   nome text primary key,                       -- nome usado nos templates (ex.: WR VEICULOS)
   client_id uuid references clients(id) on delete set null,
   drive_pasta_id text default '',              -- pasta base da loja no Drive
-  drive_padrao text default '{MES_NUM}.{MES_NOME}/CARROS/{CARRO}',  -- subpastas dentro da base
+  drive_padrao text default '06.CARROS/{ANO}/{MES_NUM}.{MES_NOME}/CARROS/{CARRO}',  -- subpastas dentro da pasta do cliente
   legenda_modelo text default '',              -- exemplo de legenda da loja (a IA segue o formato)
   dados jsonb default '{}'::jsonb,             -- endereço, WhatsApp, site etc. (usados na legenda)
   ativo boolean default true,

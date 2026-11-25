@@ -1,5 +1,6 @@
-// Função do Supabase: cria as pastas e sobe os arquivos no Google Drive da agência.
-// Segredos: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN (conta Google dona das pastas dos clientes).
+// Função do Supabase: cria as pastas e sobe as artes no Google Drive da agência.
+// Quem mexe no Drive é o script do Google "Drive 2L" (drive/organizar-drive-2l.gs, função doPost),
+// que roda como dono das pastas. Segredos: DRIVE_SCRIPT_URL (link do App da Web) e DRIVE_SCRIPT_SEGREDO.
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
 
 const cors = {
@@ -10,40 +11,15 @@ const cors = {
 const json = (b: unknown, status = 200) =>
   new Response(JSON.stringify(b), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
-let token: { v: string; exp: number } | null = null;
-async function accessToken() {
-  if (token && token.exp > Date.now() + 60000) return token.v;
-  const r = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: Deno.env.get("GOOGLE_CLIENT_ID")!, client_secret: Deno.env.get("GOOGLE_CLIENT_SECRET")!,
-      refresh_token: Deno.env.get("GOOGLE_REFRESH_TOKEN")!, grant_type: "refresh_token",
-    }),
-  });
-  const j = await r.json();
-  if (!r.ok) throw new Error("Google recusou o acesso: " + (j.error_description || j.error));
-  token = { v: j.access_token, exp: Date.now() + j.expires_in * 1000 };
-  return token.v;
-}
-async function g(url: string, init: RequestInit = {}) {
-  const r = await fetch(url, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${await accessToken()}` } });
-  const j = await r.json();
-  if (!r.ok) throw new Error("Drive: " + (j.error?.message || r.status));
+async function script(body: Record<string, unknown>) {
+  const url = Deno.env.get("DRIVE_SCRIPT_URL"), segredo = Deno.env.get("DRIVE_SCRIPT_SEGREDO");
+  if (!url || !segredo) throw new Error("O Drive ainda não foi configurado (faltam DRIVE_SCRIPT_URL e DRIVE_SCRIPT_SEGREDO no Supabase).");
+  const r = await fetch(url, { method: "POST", redirect: "follow", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ ...body, segredo }) });
+  const t = await r.text();
+  let j: any;
+  try { j = JSON.parse(t); } catch { throw new Error("O script do Drive não respondeu direito. Confira se a implantação é App da Web com acesso para qualquer pessoa."); }
+  if (j.error) throw new Error("Drive: " + j.error);
   return j;
-}
-const q = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-const FOLDER = "application/vnd.google-apps.folder";
-
-async function pasta(pai: string, nome: string) {
-  const busca = `name = '${q(nome)}' and '${q(pai)}' in parents and mimeType = '${FOLDER}' and trashed = false`;
-  const r = await g(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(busca)}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`);
-  if (r.files?.length) return r.files[0].id as string;
-  const c = await g("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: nome, mimeType: FOLDER, parents: [pai] }),
-  });
-  return c.id as string;
 }
 
 // só quem tem a permissão "esteira" no 2L Core (Ajustes > Acessos) usa esta função
@@ -63,27 +39,12 @@ Deno.serve(async (req) => {
   try {
     const b = await req.json();
     if (b.acao === "pasta") {
-      // caminho relativo à pasta base da loja, ex.: "11.NOVEMBRO/CARROS/VOLKSWAGEN SAVEIRO 2023"
-      let id = String(b.base || "");
-      if (!id) throw new Error("Loja sem pasta base no Drive.");
-      for (const parte of String(b.caminho || "").split("/").map((s: string) => s.trim()).filter(Boolean)) id = await pasta(id, parte);
-      return json({ id, url: `https://drive.google.com/drive/folders/${id}` });
+      // caminho relativo à pasta do cliente, ex.: "06.CARROS/2026/11.NOVEMBRO/CARROS/VOLKSWAGEN SAVEIRO 2023"
+      if (!b.base) throw new Error("Loja sem pasta base no Drive.");
+      return json(await script({ acao: "pasta", base: String(b.base), caminho: String(b.caminho || "") }));
     }
     if (b.acao === "arquivo") {
-      const bytes = Uint8Array.from(atob(b.base64), (c) => c.charCodeAt(0));
-      // substitui se já existir arquivo com o mesmo nome na pasta
-      const busca = `name = '${q(b.nome)}' and '${q(b.pasta)}' in parents and trashed = false`;
-      const ex = await g(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(busca)}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`);
-      const fd = new FormData();
-      const meta: Record<string, unknown> = { name: b.nome };
-      if (!ex.files?.length) meta.parents = [b.pasta];
-      fd.append("metadata", new Blob([JSON.stringify(meta)], { type: "application/json" }));
-      fd.append("file", new Blob([bytes], { type: b.mime || "application/octet-stream" }));
-      const url = ex.files?.length
-        ? `https://www.googleapis.com/upload/drive/v3/files/${ex.files[0].id}?uploadType=multipart&supportsAllDrives=true`
-        : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true";
-      const r = await g(url, { method: ex.files?.length ? "PATCH" : "POST", body: fd });
-      return json({ id: r.id });
+      return json(await script({ acao: "arquivo", pasta: String(b.pasta), nome: String(b.nome), mime: b.mime, base64: b.base64 }));
     }
     return json({ error: "ação desconhecida" }, 400);
   } catch (e) {

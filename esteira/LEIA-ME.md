@@ -40,23 +40,16 @@ Os ajustes de posição feitos na tela **Ajustar** ficam salvos: reimportar não
    - `claude-haiku-5-5` sai bem mais barato, mas o texto fica mais simples.
 
 ## 4. Google Drive
-Use o mesmo projeto do Google Cloud da Agenda.
-1. **APIs e serviços > Biblioteca**: ative a **Google Drive API**.
-2. **Credenciais > Criar credenciais > ID do cliente OAuth** do tipo **Aplicativo da Web**.
-   - Em URIs de redirecionamento autorizados, coloque `https://developers.google.com/oauthplayground`.
-   - Anote o ID do cliente e a chave secreta.
-3. **Tela de consentimento**:
-   - Adicione o escopo `https://www.googleapis.com/auth/drive`.
-   - Mude o status de publicação para **Em produção**. Em modo de teste, a autorização vence em 7 dias.
-     O Google vai mostrar o aviso de "app não verificado", e isso não tem problema, porque o app é só de vocês.
-4. Em https://developers.google.com/oauthplayground:
-   1. Na engrenagem, marque **Use your own OAuth credentials** e cole o ID e a chave.
-   2. Em "Input your own scopes", escreva `https://www.googleapis.com/auth/drive` e clique em **Authorize APIs**.
-      Entre com a conta Google que é **dona das pastas dos clientes no Drive**. Os arquivos vão ser salvos em nome dela.
-   3. Clique em **Exchange authorization code for tokens** e copie o **Refresh token**.
-5. Publique a função `esteira-drive` do mesmo jeito da IA, com o arquivo
-   `supabase/functions/esteira-drive/index.ts`.
-6. Crie os segredos `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` e `GOOGLE_REFRESH_TOKEN`.
+Quem salva no Drive é o script do Google **Drive 2L** (o mesmo que organiza as pastas dos clientes), rodando na conta dona das pastas. A função `esteira-drive` já está publicada e só repassa o pedido para ele.
+1. No projeto do script (script.google.com, conta criativo), rode a função **configurarEsteira** e copie o segredo que aparece no registro.
+2. **Implantar > Nova implantação**, tipo **App da Web**:
+   - Executar como: **Eu**.
+   - Quem pode acessar: **Qualquer pessoa**. Só quem tem o segredo consegue usar, e o script só mexe dentro da pasta CLIENTES.
+   - Copie o **URL do app da Web**.
+3. No Supabase, **Edge Functions > Secrets**, crie `DRIVE_SCRIPT_URL` (o URL) e `DRIVE_SCRIPT_SEGREDO` (o segredo).
+
+Cada loja já aponta para a pasta do cliente. As artes vão para `06.CARROS/ANO/MM.MÊS/CARROS/<carro>`, os vendidos para `.../VENDIDOS/<carro>` e os comunicados para `02.ARTES/ANO/MM.MÊS/COMUNICADOS/`.
+Se mudar o código do script depois, use **Implantar > Gerenciar implantações > editar > Nova versão**, para o link continuar o mesmo.
 
 ## Como usar
 - **Abas**: **Posts** (com as sub-abas **Anúncios e vendidos** e **Comunicados**) e **Templates** (cadastro das lojas e das artes).
