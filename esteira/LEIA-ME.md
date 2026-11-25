@@ -41,12 +41,11 @@ Os ajustes de posição feitos na tela **Ajustar** ficam salvos: reimportar não
 
 ## 4. Google Drive
 Quem salva no Drive é o script do Google **Drive 2L** (o mesmo que organiza as pastas dos clientes), rodando na conta dona das pastas. A função `esteira-drive` já está publicada e só repassa o pedido para ele.
-1. No projeto do script (script.google.com, conta criativo), rode a função **configurarEsteira** e copie o segredo que aparece no registro.
-2. **Implantar > Nova implantação**, tipo **App da Web**:
+1. No projeto do script (script.google.com, conta criativo): **Implantar > Nova implantação**, tipo **App da Web**:
    - Executar como: **Eu**.
-   - Quem pode acessar: **Qualquer pessoa**. Só quem tem o segredo consegue usar, e o script só mexe dentro da pasta CLIENTES.
+   - Quem pode acessar: **Qualquer pessoa**. O script confere no Supabase se quem pediu tem acesso à Esteira e só mexe dentro da pasta CLIENTES.
    - Copie o **URL do app da Web**.
-3. No Supabase, **Edge Functions > Secrets**, crie `DRIVE_SCRIPT_URL` (o URL) e `DRIVE_SCRIPT_SEGREDO` (o segredo).
+2. O URL fica em `esteira_config.data.drive_script_url` (o Claude grava direto no banco).
 
 Cada loja já aponta para a pasta do cliente. As artes vão para `06.CARROS/ANO/MM.MÊS/CARROS/<carro>`, os vendidos para `.../VENDIDOS/<carro>` e os comunicados para `02.ARTES/ANO/MM.MÊS/COMUNICADOS/`.
 Se mudar o código do script depois, use **Implantar > Gerenciar implantações > editar > Nova versão**, para o link continuar o mesmo.
