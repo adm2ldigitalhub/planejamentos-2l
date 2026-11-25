@@ -783,7 +783,8 @@ async function sendImages(d,list,items){
 }
 
 /* =================== CADASTRO DOS CLIENTES =================== */
-const STATUS={onboarding:"Em onboarding",ativo:"Ativo",pausado:"Pausado",encerrado:"Encerrado"};
+// ciclo do cliente: em iniciação -> ativo -> em pausa (parou a operação, acessos e materiais ainda não entregues) -> inativo
+const STATUS={onboarding:"Em iniciação",ativo:"Ativo",pausado:"Em pausa",encerrado:"Inativo"};
 const stOf=c=>STATUS[c.status]?c.status:"ativo";
 const live=c=>stOf(c)==="ativo"||stOf(c)==="onboarding";
 // opções iguais às listas suspensas do modelo no D4Sign
@@ -904,7 +905,7 @@ function renderClients(){
   all.forEach(c=>{counts[stOf(c)]++;if(live(c))counts.live++});
   const q=norm(S.cq);
   const list=all.filter(c=>(S.cfilter==="all"||(S.cfilter==="live"?live(c):stOf(c)===S.cfilter))&&(!q||norm(c.name).includes(q)||norm(S.priv[c.id]?.["razão social"]).includes(q)));
-  const seg=[["live","Ativos"],["onboarding","Onboarding"],["pausado","Pausados"],["encerrado","Encerrados"],["all","Todos"]]
+  const seg=[["live","Ativos e em iniciação"],["onboarding","Em iniciação"],["pausado","Em pausa"],["encerrado","Inativos"],["all","Todos"]]
     .map(([k,t])=>`<button data-f="${k}" aria-pressed="${S.cfilter===k}">${t}<b>${counts[k]}</b></button>`).join("");
   const mrr=S.admin?all.filter(c=>stOf(c)==="ativo").reduce((s,c)=>s+(moneyNum(S.priv[c.id]?.["valor mensal do plano"])||0),0):0;
   const m=$("#main");
@@ -912,7 +913,7 @@ function renderClients(){
     ${store.demo?`<div class="banner">Modo demonstração: os dados ficam só neste navegador.</div>`:""}
     ${S.adminErr?`<div class="banner">Para liberar os dados de contrato, rode de novo o <b>supabase.sql</b> no Supabase (SQL Editor &gt; New query &gt; Run).</div>`:""}
     <div class="listhead"><div class="grow"><h1>Clientes</h1>
-      <p class="sub">${counts.ativo} ${counts.ativo===1?"ativo":"ativos"}${counts.onboarding?`, ${counts.onboarding} em onboarding`:""}${S.admin&&mrr?` · R$ ${money(mrr)} por mês`:""}</p></div>
+      <p class="sub">${counts.ativo} ${counts.ativo===1?"ativo":"ativos"}${counts.onboarding?`, ${counts.onboarding} em iniciação`:""}${counts.pausado?`, ${counts.pausado} em pausa`:""}${S.admin&&mrr?` · R$ ${money(mrr)} por mês`:""}</p></div>
       <button class="btn primary" id="newClient">Novo cliente</button></div>
     ${all.length?`<div class="tools"><input class="search" id="cq" type="search" placeholder="Buscar cliente" value="${esc(S.cq)}"><div class="seg">${seg}</div></div>`:""}
     <div class="clients">${

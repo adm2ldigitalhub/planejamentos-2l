@@ -89,7 +89,7 @@ Na primeira vez que clicar em **Puxar da Google Agenda**, o Google abre uma jane
 
 A aba **Clientes** substitui o controle no ClickUp. Cada cliente tem uma ficha com:
 
-- **Pacote e entregáveis**, situação (onboarding, ativo, pausado, encerrado), dia de vencimento e início. **Toda a equipe vê.**
+- **Pacote e entregáveis**, situação (em iniciação, ativo, em pausa, inativo), dia de vencimento e início. **Em pausa** é quem parou a operação mas ainda não recebeu os acessos e os materiais. **Toda a equipe vê.**
 - **Dados da empresa, representante legal, financeiro e contrato** (valor, forma de pagamento, taxa, fidelidade, observações do comercial). **Só administradores veem.** Isso é bloqueado no próprio banco, não só escondido na tela.
 
 **Acessos:** o administrador (`adm@2ldigitalhub.com`) gerencia tudo em **Ajustes > Gerenciar acessos**: cria o login de cada pessoa com nome, e-mail e senha, e marca o que ela pode usar.
@@ -102,7 +102,7 @@ A aba **Clientes** substitui o controle no ClickUp. Cada cliente tem uma ficha c
 Ali também dá para trocar a senha de alguém ou excluir o acesso. Cada pessoa troca a própria senha em **Ajustes > Minha senha**. Quem não está na lista não vê nada. O `adm@2ldigitalhub.com` sempre tem tudo, mesmo que alguém mude: rodar o `supabase.sql` de novo devolve.
 
 **Cliente novo:**
-1. **Clientes > Novo cliente**. Ele já entra em *onboarding*, com o vencimento sugerido (começou dia 3, vence dia 10).
+1. **Clientes > Novo cliente**. Ele já entra *em iniciação*, com o vencimento sugerido (começou dia 3, vence dia 10).
 2. Na ficha, escolha o plano e preencha o **Contrato** com o que foi alinhado com o comercial.
 3. Clique em **Gerar link do formulário** e mande para o cliente. Ele preenche os dados da empresa, do representante e do financeiro, e tudo cai direto na ficha. O link vale uma vez só.
 4. Em **Para o contrato no D4Sign**, cada campo aparece com o mesmo nome do modelo e um botão **Copiar**. Os que faltam ficam em vermelho.
